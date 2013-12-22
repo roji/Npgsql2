@@ -141,6 +141,7 @@ namespace NpgsqlTests
         public TestDbContext(DbConnection existingConnection, bool contextOwnsConnection)
             : base(existingConnection, contextOwnsConnection)
         {
+            Database.SetInitializer<TestDbContext>(null);
         }
 
         public DbSet<Post> Posts { get; set; }
