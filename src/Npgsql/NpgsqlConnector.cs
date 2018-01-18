@@ -848,7 +848,43 @@ namespace Npgsql
             => ReadMessage(false, dataRowLoadingMode).Result;
 
         [ItemCanBeNull]
-        internal async ValueTask<IBackendMessage> ReadMessage(
+        internal ValueTask<IBackendMessage> ReadMessage(
+            bool async,
+            DataRowLoadingMode dataRowLoadingMode = DataRowLoadingMode.NonSequential,
+            bool readingNotifications = false)
+        {
+            if (_pendingPrependedResponses > 0 ||
+                dataRowLoadingMode != DataRowLoadingMode.NonSequential ||
+                readingNotifications ||
+                ReadBuffer.ReadBytesLeft < 5)
+            {
+                return ReadMessageLong(async, dataRowLoadingMode, readingNotifications);
+            }
+
+            var messageCode = (BackendMessageCode)ReadBuffer.ReadByte();
+            switch (messageCode)
+            {
+            case BackendMessageCode.NoticeResponse:
+            case BackendMessageCode.NotificationResponse:
+            case BackendMessageCode.ParameterStatus:
+            case BackendMessageCode.ErrorResponse:
+                ReadBuffer.ReadPosition--;
+                return ReadMessageLong(async, dataRowLoadingMode, readingNotifications);
+            }
+
+            PGUtil.ValidateBackendMessageCode(messageCode);
+            var len = ReadBuffer.ReadInt32() - 4; // Transmitted length includes itself
+            if (len > ReadBuffer.ReadBytesLeft)
+            {
+                ReadBuffer.ReadPosition -= 5;
+                return ReadMessageLong(async, dataRowLoadingMode, readingNotifications);
+            }
+
+            return new ValueTask<IBackendMessage>(ParseServerMessage(ReadBuffer, messageCode, len, false));
+        }
+
+        [ItemCanBeNull]
+        async ValueTask<IBackendMessage> ReadMessageLong(
             bool async,
             DataRowLoadingMode dataRowLoadingMode = DataRowLoadingMode.NonSequential,
             bool readingNotifications = false,
@@ -861,7 +897,7 @@ namespace Npgsql
                 {
                     ReceiveTimeout = InternalCommandTimeout;
                     for (; _pendingPrependedResponses > 0; _pendingPrependedResponses--)
-                        await ReadMessage(async, DataRowLoadingMode.Skip, false, true);
+                        await ReadMessageLong(async, DataRowLoadingMode.Skip, false, true);
                 }
                 catch (PostgresException)
                 {

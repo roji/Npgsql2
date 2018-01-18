@@ -56,7 +56,7 @@ namespace Npgsql
 
         internal Encoding TextEncoding { get; }
 
-        internal int ReadPosition { get; private set; }
+        internal int ReadPosition { get; set; }
         internal int ReadBytesLeft => _filledBytes - ReadPosition;
 
         internal byte[] Buffer { get; }
