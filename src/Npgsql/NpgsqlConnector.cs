@@ -1078,37 +1078,17 @@ namespace Npgsql
         /// Reads backend messages and discards them, stopping only after a message of the given type has
         /// been seen.
         /// </summary>
-        internal async ValueTask<IBackendMessage> SkipUntil(BackendMessageCode stopAt, bool async)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal IBackendMessage SkipUntil(BackendMessageCode stopAt)
         {
             Debug.Assert(stopAt != BackendMessageCode.DataRow, "Shouldn't be used for rows, doesn't know about sequential");
 
             while (true)
             {
-                var msg = await ReadMessage(async, DataRowLoadingMode.Skip);
+                var msg = ReadMessage(false, DataRowLoadingMode.Skip).GetAwaiter().GetResult();
                 Debug.Assert(!(msg is DataRowMessage));
-                if (msg.Code == stopAt) {
+                if (msg.Code == stopAt)
                     return msg;
-                }
-            }
-        }
-
-        internal IBackendMessage SkipUntil(BackendMessageCode stopAt) => SkipUntil(stopAt, false).Result;
-
-        /// <summary>
-        /// Reads backend messages and discards them, stopping only after a message of the given types has
-        /// been seen.
-        /// </summary>
-        internal async ValueTask<IBackendMessage> SkipUntil(BackendMessageCode stopAt1, BackendMessageCode stopAt2, bool async)
-        {
-            Debug.Assert(stopAt1 != BackendMessageCode.DataRow, "Shouldn't be used for rows, doesn't know about sequential");
-            Debug.Assert(stopAt2 != BackendMessageCode.DataRow, "Shouldn't be used for rows, doesn't know about sequential");
-
-            while (true) {
-                var msg = await ReadMessage(async, DataRowLoadingMode.Skip);
-                Debug.Assert(!(msg is DataRowMessage));
-                if (msg.Code == stopAt1 || msg.Code == stopAt2) {
-                    return msg;
-                }
             }
         }
 
@@ -1658,7 +1638,7 @@ namespace Npgsql
 
                 Log.Trace("Performed keepalive", Id);
                 SendMessage(PregeneratedMessage.KeepAlive);
-                SkipUntil(BackendMessageCode.ReadyForQuery, false).GetAwaiter().GetResult();
+                SkipUntil(BackendMessageCode.ReadyForQuery);
             }
             catch (Exception e)
             {
