@@ -42,6 +42,71 @@ namespace Npgsql.Tests
 {
     public class ConnectionTests : TestBase
     {
+        [Test]
+        public async Task Crap()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString)
+            {
+                NoResetOnClose = true
+            }.ToString();
+
+            for (var i = 0; i < 10; i++)
+            {
+                using (var conn = new NpgsqlConnection(connString))
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT 1, 'foo'::TEXT";
+
+                    await conn.OpenAsync();
+                    {
+                        cmd.Prepare();
+                        using (var reader = await cmd.ExecuteReaderAsync(CommandBehavior.CloseConnection))
+                        {
+                            while (await reader.ReadAsync())
+                            {
+                                Assert.That(reader.GetInt32(0), Is.EqualTo(1));
+                                Assert.That(reader.GetString(1), Is.EqualTo("foo"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        [Test]
+        public Task ParallelCrap()
+        {
+            var connString = new NpgsqlConnectionStringBuilder(ConnectionString)
+            {
+                NoResetOnClose = true
+            }.ToString();
+
+
+            return Task.WhenAll(Enumerable.Range(0, 10).Select(i => Task.Run(async () => {
+            for (var j = 0; j < 10000; j++)
+            {
+                using (var conn = new NpgsqlConnection(connString))
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT 1, 'foo'::TEXT";
+
+                    await conn.OpenAsync();
+                    {
+                        cmd.Prepare();
+                        using (var reader = await cmd.ExecuteReaderAsync(CommandBehavior.CloseConnection))
+                        {
+                            while (await reader.ReadAsync())
+                            {
+                                Assert.That(reader.GetInt32(0), Is.EqualTo(1));
+                                Assert.That(reader.GetString(1), Is.EqualTo("foo"));
+                            }
+                        }
+                    }
+                }
+            }
+            })));
+        }
+
         [Test, Description("Makes sure the connection goes through the proper state lifecycle")]
         //[Timeout(5000)]
         public void BasicLifecycle()
