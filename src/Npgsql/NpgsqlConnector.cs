@@ -222,9 +222,10 @@ namespace Npgsql
         readonly RowDescriptionMessage       _rowDescriptionMessage       = new RowDescriptionMessage();
 
         // Since COPY is rarely used, allocate these lazily
-        CopyInResponseMessage?  _copyInResponseMessage;
-        CopyOutResponseMessage? _copyOutResponseMessage;
-        CopyDataMessage?        _copyDataMessage;
+        CopyInResponseMessage?   _copyInResponseMessage;
+        CopyOutResponseMessage?  _copyOutResponseMessage;
+        CopyDataMessage?         _copyDataMessage;
+        CopyBothResponseMessage? _copyBothResponseMessage;
 
         #endregion
 
@@ -449,6 +450,16 @@ namespace Npgsql
             var timezone = Settings.Timezone ?? PostgresEnvironment.TimeZone;
             if (timezone != null)
                 startupParams["TimeZone"] = timezone;
+
+            switch (Settings.ReplicationMode)
+            {
+            case ReplicationMode.Logical:
+                startupParams["replication"] = "database";
+                break;
+            case ReplicationMode.Physical:
+                startupParams["replication"] = "true";
+                break;
+            }
 
             WriteStartup(startupParams);
         }
@@ -1027,6 +1038,9 @@ namespace Npgsql
                     return (_copyOutResponseMessage ??= new CopyOutResponseMessage()).Load(ReadBuffer);
                 case BackendMessageCode.CopyData:
                     return (_copyDataMessage ??= new CopyDataMessage()).Load(len);
+                case BackendMessageCode.CopyBothResponse:
+                    return (_copyBothResponseMessage ??= new CopyBothResponseMessage()).Load(ReadBuffer);
+
                 case BackendMessageCode.CopyDone:
                     return CopyDoneMessage.Instance;
 
