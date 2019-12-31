@@ -39,13 +39,6 @@ namespace Npgsql.Tests
         }
 
         [Test]
-        public void MinPoolSizeLargerThanPoolSizeLimit()
-        {
-            var csb = new NpgsqlConnectionStringBuilder(ConnectionString);
-            Assert.That(() => csb.MinPoolSize = ConnectorPool.PoolSizeLimit + 1, Throws.Exception.TypeOf<ArgumentOutOfRangeException>());
-        }
-
-        [Test]
         public void ReuseConnectorBeforeCreatingNew()
         {
             var connString = new NpgsqlConnectionStringBuilder(ConnectionString)
