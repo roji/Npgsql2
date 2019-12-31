@@ -451,6 +451,12 @@ namespace Npgsql
 
         internal void Flush() => WriteBuffer.Flush(false).GetAwaiter().GetResult();
 
-        internal Task Flush(bool async) => WriteBuffer.Flush(async);
+        internal Task Flush(bool async)
+        {
+            CommandsFlushed += CommandsInFlight.Count;
+            return WriteBuffer.Flush(async);
+        }
+
+        internal int CommandsFlushed;
     }
 }

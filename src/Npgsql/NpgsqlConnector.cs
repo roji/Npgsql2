@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -162,10 +163,6 @@ namespace Npgsql
         /// </summary>
         int _currentTimeout;
 
-        // This is used by NpgsqlCommand, but we place it on the connector because only one instance is needed
-        // at any one time (per connection).
-        internal SqlQueryParser SqlParser { get; }
-
         /// <summary>
         /// A lock that's taken while a user action is in progress, e.g. a command being executed.
         /// Only used when keepalive is enabled, otherwise null.
@@ -192,6 +189,8 @@ namespace Npgsql
         /// If pooled, the pool index on which this connector will be returned to the pool.
         /// </summary>
         internal int PoolIndex { get; set; } = int.MaxValue;
+
+        ConnectorPool? _pool;
 
         internal int ClearCounter { get; set; }
 
@@ -236,6 +235,7 @@ namespace Npgsql
             : this(connection.Settings, connection.OriginalConnectionString)
         {
             Connection = connection;
+            _pool = connection._pool;
             Connection.Connector = this;
             ProvideClientCertificatesCallback = Connection.ProvideClientCertificatesCallback;
             UserCertificateValidationCallback = Connection.UserCertificateValidationCallback;
@@ -262,7 +262,6 @@ namespace Npgsql
             Settings = settings;
             ConnectionString = connectionString;
             PostgresParameters = new Dictionary<string, string>();
-            SqlParser = new SqlQueryParser();
             Transaction = new NpgsqlTransaction(this);
 
             CancelLock = new object();
@@ -403,6 +402,10 @@ namespace Npgsql
                 Counters.HardConnectsPerSecond.Increment();
                 Log.Trace($"Opened connection to {Host}:{Port}");
 
+                // Each of the following invocations starts an infinite async loop, which processes outgoing and
+                // incoming traffic. They are intentionally not awaited.
+                ReadLoop();
+
                 // If an exception occurs during open, Break() below shouldn't close the connection, which would also
                 // update pool state. Instead we let the exception propagate and get handled by the calling pool code.
                 // We use an extra state flag because the connector's State varies during the type loading query
@@ -541,7 +544,7 @@ namespace Npgsql
                             certPath = PostgresEnvironment.SslCertDefault;
                             certPathExists = File.Exists(certPath);
                         }
- 
+
                         if (certPathExists)
                             clientCertificates.Add(new X509Certificate(certPath));
 
@@ -781,6 +784,49 @@ namespace Npgsql
 
         #endregion
 
+        #region I/O
+
+        internal readonly ConcurrentQueue<NpgsqlCommand> CommandsInFlight = new ConcurrentQueue<NpgsqlCommand>();
+        internal ManualResetValueTaskSource<object?> ReaderCompleted { get; } = new ManualResetValueTaskSource<object?>();
+
+        async void ReadLoop()
+        {
+            try
+            {
+                while (true)
+                {
+                    await ReadBuffer.Ensure(5, true);
+#if NET461 || NETSTANDARD2_0
+                    var command = CommandsInFlight.Dequeue();
+#else
+                    if (!CommandsInFlight.TryDequeue(out var command))
+                        throw new Exception("Got message(s) from PostgreSQL but no command is pending");
+#endif
+                    CrappyLog.Write($"CMD{command.Id:00000}|CON{Id:00000}: Read command on connector");
+                    ReaderCompleted.Reset();
+                    command.ExecutionCompletion.SetResult(null);
+                    await new ValueTask(ReaderCompleted, ReaderCompleted.Version);
+
+                    if (CommandsInFlight.Count == 0)
+                    {
+                        // No more pending commands - put the connection back in the pool's queue
+                        CrappyLog.Write($"CMD?????|CON{Id:00000}: Connector no more pending, returning to pool");
+                        // TODO: Shouldn't this be Release?
+                        var written = _pool!.IdleConnectorWriter.TryWrite(this);
+                        Debug.Assert(written);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Exception in read loop: " + ex);
+                Log.Error("Exception in read loop", ex, Id);
+                Break();
+            }
+        }
+
+        #endregion
+
         #region Frontend message processing
 
         /// <summary>
@@ -947,7 +993,7 @@ namespace Npgsql
                     if (CurrentReader != null)
                     {
                         // The reader cleanup will call EndUserAction
-                        await CurrentReader.Cleanup(async);
+                        CurrentReader.Cleanup(async);
                     }
                     else
                     {
@@ -1941,7 +1987,8 @@ namespace Npgsql
             {
             case "standard_conforming_strings":
                 UseConformingStrings = value == "on";
-                SqlParser.StandardConformingStrings = UseConformingStrings;
+                if (!UseConformingStrings)
+                    throw new NotSupportedException("standard_conforming_strings must be on");
                 return;
 
             case "TimeZone":

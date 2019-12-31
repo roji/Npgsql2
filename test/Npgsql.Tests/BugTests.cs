@@ -540,8 +540,8 @@ WHERE table_name LIKE @p0 escape '\' AND (is_updatable = 'NO') = @p1";
             var connString = new NpgsqlConnectionStringBuilder(ConnectionString)
             {
                 MaxPoolSize = 10,
-                //MaxAutoPrepare = 20,
-                //AutoPrepareMinUsages = 5
+                MaxAutoPrepare = 20,
+                AutoPrepareMinUsages = 5
             };
 
             using (var conn = OpenConnection(connString))
@@ -552,7 +552,7 @@ WHERE table_name LIKE @p0 escape '\' AND (is_updatable = 'NO') = @p1";
                     using (var cmd = new NpgsqlCommand("INSERT INTO data (name) VALUES ('John')", conn))
                         Assert.That(await cmd.ExecuteNonQueryAsync(), Is.EqualTo(1));
 
-                for (var i = 0; i < 100; i++)
+                for (var i = 0; i < 10000; i++)
                     using (var cmd2 = new NpgsqlCommand("SELECT * FROM data", conn))
                     using (var reader = await cmd2.ExecuteReaderAsync())
                         while (await reader.ReadAsync()) {}
@@ -609,8 +609,8 @@ WHERE table_name LIKE @p0 escape '\' AND (is_updatable = 'NO') = @p1";
             var connString = new NpgsqlConnectionStringBuilder(ConnectionString)
             {
                 MaxPoolSize = 20,
-                //MaxAutoPrepare = 20,
-                //AutoPrepareMinUsages = 5
+                MaxAutoPrepare = 20,
+                AutoPrepareMinUsages = 5
             }.ToString();
 
             using (var conn = OpenConnection(connString))

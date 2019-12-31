@@ -58,9 +58,9 @@ namespace Npgsql
 
         static readonly NpgsqlConnectionStringBuilder DefaultSettings = new NpgsqlConnectionStringBuilder();
 
-        ConnectorPool? _pool;
+        internal ConnectorPool? _pool;
 
-        bool _wasBroken;
+        //bool _wasBroken;
 
         internal Transaction? EnlistedTransaction { get; set; }
 
@@ -183,74 +183,93 @@ namespace Npgsql
             _pool = PoolManager.GetOrAdd(_connectionString, _pool);
         }
 
-        async Task Open(bool async, CancellationToken cancellationToken)
+        Task Open(bool async, CancellationToken cancellationToken)
         {
             CheckConnectionClosed();
 
             Log.Trace("Opening connection...");
 
-            _wasBroken = false;
+            //_wasBroken = false;
 
-            try
+            if (Settings.Multiplexing)
             {
-                var timeout = new NpgsqlTimeout(TimeSpan.FromSeconds(ConnectionTimeout));
+                // In multiplexing mode, opening doesn't actually do anything.
 
-                if (_pool == null) // Un-pooled connection (or user forgot to set connection string)
+                // TODO: Make sure the connection state works as expected! Right now Open state means
+                // that we have a connector, which doesn't work in multiplexing.
+                Log.Debug("Connection opened (multiplexing)");
+                OnStateChange(ClosedToOpenEventArgs);
+
+                return Task.CompletedTask;
+            }
+
+            return OpenNonMultiplexing();
+
+            async Task OpenNonMultiplexing()
+            {
+                try
                 {
-                    if (string.IsNullOrEmpty(_connectionString))
-                        throw new InvalidOperationException("The ConnectionString property has not been initialized.");
+                    var timeout = new NpgsqlTimeout(TimeSpan.FromSeconds(ConnectionTimeout));
 
-                    if (!Settings.PersistSecurityInfo)
-                        _userFacingConnectionString = Settings.ToStringWithoutPassword();
-
-                    Connector = new NpgsqlConnector(this);
-                    await Connector.Open(timeout, async, cancellationToken);
-                    Counters.NumberOfNonPooledConnections.Increment();
-                }
-                else
-                {
-                    _userFacingConnectionString = _pool.UserFacingConnectionString;
-
-                    if (Settings.Enlist && Transaction.Current is Transaction transaction)
+                    if (_pool == null) // Un-pooled connection (or user forgot to set connection string)
                     {
-                        // First, check to see if we there's an ambient transaction, and we have a connection enlisted
-                        // to this transaction which has been closed. If so, return that as an optimization rather than
-                        // opening a new one and triggering escalation to a distributed transaction.
-                        // Otherwise just get a new connector and enlist.
-                        if (_pool.TryRentEnlistedPending(this, transaction, out Connector))
-                            EnlistedTransaction = transaction;
-                        else
-                        {
-                            Connector = await _pool.Rent(this, timeout, async, cancellationToken);
-                            EnlistTransaction(Transaction.Current);
-                        }
+                        if (string.IsNullOrEmpty(_connectionString))
+                            throw new InvalidOperationException(
+                                "The ConnectionString property has not been initialized.");
+
+                        if (!Settings.PersistSecurityInfo)
+                            _userFacingConnectionString = Settings.ToStringWithoutPassword();
+
+                        Connector = new NpgsqlConnector(this);
+                        await Connector.Open(timeout, async, cancellationToken);
+                        Counters.NumberOfNonPooledConnections.Increment();
                     }
                     else
-                        Connector = await _pool.Rent(this, timeout, async, cancellationToken);
+                    {
+                        _userFacingConnectionString = _pool.UserFacingConnectionString;
 
-                    // Since this pooled connector was opened, types may have been added (and ReloadTypes() called),
-                    // or global mappings may have changed. Bring this up to date if needed.
-                    var mapper = Connector.TypeMapper;
-                    if (mapper.ChangeCounter != TypeMapping.GlobalTypeMapper.Instance.ChangeCounter)
-                        await Connector.LoadDatabaseInfo(NpgsqlTimeout.Infinite, async);
+                        if (Settings.Enlist && Transaction.Current is Transaction transaction)
+                        {
+                            // First, check to see if we there's an ambient transaction, and we have a connection enlisted
+                            // to this transaction which has been closed. If so, return that as an optimization rather than
+                            // opening a new one and triggering escalation to a distributed transaction.
+                            // Otherwise just get a new connector and enlist.
+                            if (_pool.TryRentEnlistedPending(this, transaction, out Connector))
+                                EnlistedTransaction = transaction;
+                            else
+                            {
+                                Connector = await _pool.Rent(this, timeout, async, cancellationToken);
+                                EnlistTransaction(Transaction.Current);
+                            }
+                        }
+                        else
+                            Connector = await _pool.Rent(this, timeout, async, cancellationToken);
+
+                        // Since this pooled connector was opened, types may have been added (and ReloadTypes() called),
+                        // or global mappings may have changed. Bring this up to date if needed.
+                        var mapper = Connector.TypeMapper;
+                        if (mapper.ChangeCounter != TypeMapping.GlobalTypeMapper.Instance.ChangeCounter)
+                            await Connector.LoadDatabaseInfo(NpgsqlTimeout.Infinite, async);
+                    }
                 }
-            }
-            catch
-            {
-                if (Connector != null)
+                catch
                 {
-                    if (_pool == null)
-                        Connector.Close();
-                    else
-                        _pool.Return(Connector);
-                    Connector = null;
+                    if (Connector != null)
+                    {
+                        if (_pool == null)
+                            Connector.Close();
+                        else
+                            _pool.Return(Connector);
+                        Connector = null;
+                    }
+
+                    throw;
                 }
 
-                throw;
+                Debug.Assert(Connector.Connection != null, "Open done but connector not set on Connection");
+                Log.Debug("Connection opened", Connector.Id);
+                OnStateChange(ClosedToOpenEventArgs);
             }
-            Debug.Assert(Connector.Connection != null, "Open done but connector not set on Connection");
-            Log.Debug("Connection opened", Connector.Id);
-            OnStateChange(ClosedToOpenEventArgs);
         }
 
         #endregion Open / Init
@@ -371,6 +390,8 @@ namespace Npgsql
         {
             get
             {
+                return ConnectionState.Open;
+#if MULTIPLEXING
                 if (Connector == null || _disposed)
                     return _wasBroken ? ConnectionState.Broken : ConnectionState.Closed;
 
@@ -386,6 +407,7 @@ namespace Npgsql
                     ConnectorState.Broken     => ConnectionState.Broken,
                     _ => throw new InvalidOperationException($"Internal Npgsql bug: unexpected value {Connector.State} of enum {nameof(ConnectorState)}. Please file a bug.")
                 };
+#endif
             }
         }
 
@@ -590,6 +612,8 @@ namespace Npgsql
         }
 
         internal Task Close(bool wasBroken, bool async)
+            => Task.CompletedTask;
+#if MULTIPLEXING
         {
             // Even though NpgsqlConnection isn't thread safe we'll make sure this part is.
             // Because we really don't want double returns to the pool.
@@ -643,6 +667,7 @@ namespace Npgsql
                 connection.OnStateChange(OpenToClosedEventArgs);
             }
         }
+#endif
 
         /// <summary>
         /// Releases all resources used by the <see cref="NpgsqlConnection">NpgsqlConnection</see>.
@@ -1230,6 +1255,17 @@ namespace Npgsql
             if (conn == null)
                 throw new InvalidOperationException("Connection is not open");
             return conn;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ConnectorPool CheckReadyAndGetPool()
+        {
+            CheckDisposed();
+
+            // This method gets called outside any lock, and might be in a race condition
+            // with an ongoing keepalive, which may break the connector (setting the connection's
+            // Connector to null). We capture the connector to the stack and return it here.
+            return _pool!;
         }
 
         #endregion State checks

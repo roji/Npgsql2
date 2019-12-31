@@ -1143,6 +1143,71 @@ namespace Npgsql
 
         #endregion
 
+        #region Multiplexing
+
+        /// <summary>
+        /// Enables multiplexing, which allows more efficient use of connections.
+        /// </summary>
+        [Category("Multiplexing")]
+        [Description("Enables multiplexing, which allows more efficient use of connections.")]
+        [DisplayName("Multiplexing")]
+        [NpgsqlConnectionStringProperty]
+        [DefaultValue(true)] // TODO: false
+        public bool Multiplexing
+        {
+            get => _multiplexing;
+            set
+            {
+                _multiplexing = value;
+                SetValue(nameof(Multiplexing), value);
+            }
+        }
+        bool _multiplexing;
+
+        /// <summary>
+        /// When multiplexing is enabled, determines the maximum amount of time to wait for further
+        /// commands before flushing to the network. In microseconds, 0 disables waiting altogether.
+        /// </summary>
+        [Category("Multiplexing")]
+        [Description("When multiplexing is enabled, determines the maximum amount of time to wait for further " +
+                     "commands before flushing to the network. In microseconds, 0 disables waiting altogether.")]
+        [DisplayName("Write Coalescing Delay Us")]
+        [NpgsqlConnectionStringProperty]
+        [DefaultValue(500)] // TODO
+        public int WriteCoalescingDelayUs
+        {
+            get => _writeCoalescingDelayUs;
+            set
+            {
+                _writeCoalescingDelayUs = value;
+                SetValue(nameof(WriteCoalescingDelayUs), value);
+            }
+        }
+        int _writeCoalescingDelayUs;
+
+        /// <summary>
+        /// When multiplexing is enabled, determines the maximum number of outgoing bytes to buffer before
+        /// flushing to the network.
+        /// </summary>
+        [Category("Multiplexing")]
+        [Description("When multiplexing is enabled, determines the maximum number of outgoing bytes to buffer before " +
+                     "flushing to the network.")]
+        [DisplayName("Write Coalescing Buffer Threshold Bytes")]
+        [NpgsqlConnectionStringProperty]
+        [DefaultValue(1070)] // TODO: Figure out what we really want to default to be. Possibly some percentage of buffer size.
+        public int WriteCoalescingBufferThresholdBytes
+        {
+            get => _writeCoalescingBufferThresholdBytes;
+            set
+            {
+                _writeCoalescingBufferThresholdBytes = value;
+                SetValue(nameof(WriteCoalescingBufferThresholdBytes), value);
+            }
+        }
+        int _writeCoalescingBufferThresholdBytes;
+
+        #endregion
+
         #region Properties - Compatibility
 
         /// <summary>
@@ -1152,6 +1217,7 @@ namespace Npgsql
         [Description("A compatibility mode for special PostgreSQL server types.")]
         [DisplayName("Server Compatibility Mode")]
         [NpgsqlConnectionStringProperty]
+        [DefaultValue(ServerCompatibilityMode.NoTypeLoading)]
         public ServerCompatibilityMode ServerCompatibilityMode
         {
             get => _serverCompatibilityMode;
