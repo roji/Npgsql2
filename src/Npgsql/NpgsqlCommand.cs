@@ -1349,7 +1349,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 throw new ObjectDisposedException(GetType().FullName);
             if (_connection == null)
                 throw new InvalidOperationException("Connection property has not been initialized.");
-            return _connection.CheckReadyAndGetConnector();
+            return _connection.CheckReadyAndBindIfNecessary();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

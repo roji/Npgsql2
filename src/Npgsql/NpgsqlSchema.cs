@@ -528,7 +528,7 @@ and n.nspname not in ('pg_catalog', 'pg_toast')");
 
         static DataTable GetDataTypes(NpgsqlConnection conn)
         {
-            var connector = conn.CheckReadyAndGetConnector();
+            var connector = conn.CheckReadyAndBindIfNecessary();
 
             var table = new DataTable("DataTypes");
 

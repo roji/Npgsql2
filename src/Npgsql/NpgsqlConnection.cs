@@ -47,7 +47,8 @@ namespace Npgsql
         internal string OriginalConnectionString => _connectionString;
 
         /// <summary>
-        /// The connector object connected to the backend.
+        /// The physical connection to the database. This is <c>null</c> when the connection is closed,
+        /// and also when it is open in multiplexing mode and unbound (e.g. not in a transaction).
         /// </summary>
         internal NpgsqlConnector? Connector;
 
@@ -74,7 +75,7 @@ namespace Npgsql
         /// The connection-specific type mapper - all modifications affect this connection only,
         /// and are lost when it is closed.
         /// </summary>
-        public INpgsqlTypeMapper TypeMapper => CheckReadyAndGetConnector().TypeMapper;
+        public INpgsqlTypeMapper TypeMapper => CheckReadyAndBindIfNecessary().TypeMapper;
 
         ///
         /// <summary>
@@ -86,6 +87,12 @@ namespace Npgsql
         /// Maximum value for connection timeout.
         /// </summary>
         internal const int TimeoutLimit = 1024;
+
+        /// <summary>
+        /// Tracks when this connection was bound to a physical connector (e.g. at open-time, when a transaction
+        /// was started...).
+        /// </summary>
+        ConnectorBindingTime? _connectorBindingTime;
 
         static readonly NpgsqlLogger Log = NpgsqlLogManager.CreateLogger(nameof(NpgsqlConnection));
 
@@ -191,85 +198,93 @@ namespace Npgsql
 
             //_wasBroken = false;
 
-            if (Settings.Multiplexing)
+            if (Settings.Multiplexing &&
+                (!Settings.Enlist || Transaction.Current is null))
             {
                 // In multiplexing mode, opening doesn't actually do anything.
 
                 // TODO: Make sure the connection state works as expected! Right now Open state means
                 // that we have a connector, which doesn't work in multiplexing.
                 Log.Debug("Connection opened (multiplexing)");
+                FullState = ConnectionState.Open;
                 OnStateChange(ClosedToOpenEventArgs);
 
                 return Task.CompletedTask;
             }
 
-            return OpenNonMultiplexing();
+            return BindToConnector(ConnectorBindingTime.Open, async, cancellationToken);
+        }
 
-            async Task OpenNonMultiplexing()
+        /// <summary>
+        /// Binds this connection to a physical connector. This happens when opening a non-multiplexing connection,
+        /// or when starting a transaction on a multiplexed connection.
+        /// </summary>
+        async Task BindToConnector(ConnectorBindingTime bindingTime, bool async, CancellationToken cancellationToken)
+        {
+            try
             {
-                try
+                var timeout = new NpgsqlTimeout(TimeSpan.FromSeconds(ConnectionTimeout));
+
+                if (_pool == null) // Un-pooled connection (or user forgot to set connection string)
                 {
-                    var timeout = new NpgsqlTimeout(TimeSpan.FromSeconds(ConnectionTimeout));
+                    if (string.IsNullOrEmpty(_connectionString))
+                        throw new InvalidOperationException("The ConnectionString property has not been initialized.");
 
-                    if (_pool == null) // Un-pooled connection (or user forgot to set connection string)
+                    if (!Settings.PersistSecurityInfo)
+                        _userFacingConnectionString = Settings.ToStringWithoutPassword();
+
+                    Connector = new NpgsqlConnector(this);
+                    await Connector.Open(timeout, async, cancellationToken);
+                    Counters.NumberOfNonPooledConnections.Increment();
+                }
+                else
+                {
+                    _userFacingConnectionString = _pool.UserFacingConnectionString;
+
+                    if (Settings.Enlist && Transaction.Current is Transaction transaction)
                     {
-                        if (string.IsNullOrEmpty(_connectionString))
-                            throw new InvalidOperationException(
-                                "The ConnectionString property has not been initialized.");
-
-                        if (!Settings.PersistSecurityInfo)
-                            _userFacingConnectionString = Settings.ToStringWithoutPassword();
-
-                        Connector = new NpgsqlConnector(this);
-                        await Connector.Open(timeout, async, cancellationToken);
-                        Counters.NumberOfNonPooledConnections.Increment();
+                        // First, check to see if we there's an ambient transaction, and we have a connection enlisted
+                        // to this transaction which has been closed. If so, return that as an optimization rather than
+                        // opening a new one and triggering escalation to a distributed transaction.
+                        // Otherwise just get a new connector and enlist.
+                        if (_pool.TryRentEnlistedPending(this, transaction, out Connector))
+                            EnlistedTransaction = transaction;
+                        else
+                        {
+                            Connector = await _pool.Rent(this, timeout, async, cancellationToken);
+                            EnlistTransaction(Transaction.Current);
+                        }
                     }
                     else
-                    {
-                        _userFacingConnectionString = _pool.UserFacingConnectionString;
+                        Connector = await _pool.Rent(this, timeout, async, cancellationToken);
 
-                        if (Settings.Enlist && Transaction.Current is Transaction transaction)
-                        {
-                            // First, check to see if we there's an ambient transaction, and we have a connection enlisted
-                            // to this transaction which has been closed. If so, return that as an optimization rather than
-                            // opening a new one and triggering escalation to a distributed transaction.
-                            // Otherwise just get a new connector and enlist.
-                            if (_pool.TryRentEnlistedPending(this, transaction, out Connector))
-                                EnlistedTransaction = transaction;
-                            else
-                            {
-                                Connector = await _pool.Rent(this, timeout, async, cancellationToken);
-                                EnlistTransaction(Transaction.Current);
-                            }
-                        }
-                        else
-                            Connector = await _pool.Rent(this, timeout, async, cancellationToken);
-
-                        // Since this pooled connector was opened, types may have been added (and ReloadTypes() called),
-                        // or global mappings may have changed. Bring this up to date if needed.
-                        var mapper = Connector.TypeMapper;
-                        if (mapper.ChangeCounter != TypeMapping.GlobalTypeMapper.Instance.ChangeCounter)
-                            await Connector.LoadDatabaseInfo(NpgsqlTimeout.Infinite, async);
-                    }
+                    // Since this pooled connector was opened, types may have been added (and ReloadTypes() called),
+                    // or global mappings may have changed. Bring this up to date if needed.
+                    var mapper = Connector.TypeMapper;
+                    if (mapper.ChangeCounter != TypeMapping.GlobalTypeMapper.Instance.ChangeCounter)
+                        await Connector.LoadDatabaseInfo(NpgsqlTimeout.Infinite, async);
                 }
-                catch
-                {
-                    if (Connector != null)
-                    {
-                        if (_pool == null)
-                            Connector.Close();
-                        else
-                            _pool.Return(Connector);
-                        Connector = null;
-                    }
-
-                    throw;
-                }
-
-                Debug.Assert(Connector.Connection != null, "Open done but connector not set on Connection");
-                Log.Debug("Connection opened", Connector.Id);
-                OnStateChange(ClosedToOpenEventArgs);
             }
+            catch
+            {
+                if (Connector != null)
+                {
+                    if (_pool == null)
+                        Connector.Close();
+                    else
+                        _pool.Return(Connector);
+                    Connector = null;
+                }
+
+                throw;
+            }
+
+            Debug.Assert(Connector.Connection != null, "Open done but connector not set on Connection");
+            _connectorBindingTime = bindingTime;
+
+            Log.Debug("Connection opened", Connector.Id);
+            FullState = ConnectionState.Open;
+            OnStateChange(ClosedToOpenEventArgs);
         }
 
         #endregion Open / Init
@@ -386,12 +401,14 @@ namespace Npgsql
         /// </summary>
         /// <value>A bitwise combination of the <see cref="System.Data.ConnectionState">ConnectionState</see> values. The default is <b>Closed</b>.</value>
         [Browsable(false)]
-        public ConnectionState FullState
+        public ConnectionState FullState { get; private set; }
+
+#if MULTIPLEXING
         {
             get
             {
+
                 return ConnectionState.Open;
-#if MULTIPLEXING
                 if (Connector == null || _disposed)
                     return _wasBroken ? ConnectionState.Broken : ConnectionState.Closed;
 
@@ -407,9 +424,9 @@ namespace Npgsql
                     ConnectorState.Broken     => ConnectionState.Broken,
                     _ => throw new InvalidOperationException($"Internal Npgsql bug: unexpected value {Connector.State} of enum {nameof(ConnectorState)}. Please file a bug.")
                 };
-#endif
             }
         }
+#endif
 
         /// <summary>
         /// Gets whether the current state of the connection is Open or Closed
@@ -492,9 +509,17 @@ namespace Npgsql
         /// </remarks>
         public new NpgsqlTransaction BeginTransaction(IsolationLevel level)
         {
+        }
+
+        async ValueTask<NpgsqlTransaction> BeginTransaction(IsolationLevel level, bool async, CancellationToken cancellationToken)
+        {
             if (level == IsolationLevel.Chaos)
                 throw new NotSupportedException("Unsupported IsolationLevel: " + level);
-            var connector = CheckReadyAndGetConnector();
+            CheckReady();
+
+            if (Connector == null)
+                await BindToConnector(ConnectorBindingTime.StartCopy, async, cancellationToken);
+
 
             // Note that beginning a transaction doesn't actually send anything to the backend
             // (only prepends), so strictly speaking we don't have to start a user action.
@@ -571,7 +596,7 @@ namespace Npgsql
                 }
             }
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
 
             EnlistedTransaction = transaction;
             if (transaction == null)
@@ -844,7 +869,7 @@ namespace Npgsql
             if (!copyFromCommand.TrimStart().ToUpper().StartsWith("COPY"))
                 throw new ArgumentException("Must contain a COPY FROM STDIN command!", nameof(copyFromCommand));
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
             Log.Debug("Starting binary import", connector.Id);
             connector.StartUserAction(ConnectorState.Copy);
             try
@@ -875,7 +900,7 @@ namespace Npgsql
             if (!copyToCommand.TrimStart().ToUpper().StartsWith("COPY"))
                 throw new ArgumentException("Must contain a COPY TO STDOUT command!", nameof(copyToCommand));
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
             Log.Debug("Starting binary export", connector.Id);
             connector.StartUserAction(ConnectorState.Copy);
             try
@@ -909,7 +934,7 @@ namespace Npgsql
             if (!copyFromCommand.TrimStart().ToUpper().StartsWith("COPY"))
                 throw new ArgumentException("Must contain a COPY FROM STDIN command!", nameof(copyFromCommand));
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
             Log.Debug("Starting text import", connector.Id);
             connector.StartUserAction(ConnectorState.Copy);
             try
@@ -943,7 +968,7 @@ namespace Npgsql
             if (!copyToCommand.TrimStart().ToUpper().StartsWith("COPY"))
                 throw new ArgumentException("Must contain a COPY TO STDOUT command!", nameof(copyToCommand));
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
             Log.Debug("Starting text export", connector.Id);
             connector.StartUserAction(ConnectorState.Copy);
             try
@@ -977,7 +1002,7 @@ namespace Npgsql
             if (!copyCommand.TrimStart().ToUpper().StartsWith("COPY"))
                 throw new ArgumentException("Must contain a COPY TO STDOUT OR COPY FROM STDIN command!", nameof(copyCommand));
 
-            var connector = CheckReadyAndGetConnector();
+            var connector = CheckReadyAndBindIfNecessary();
             Log.Debug("Starting raw COPY operation", connector.Id);
             connector.StartUserAction(ConnectorState.Copy);
             try
@@ -1171,13 +1196,16 @@ namespace Npgsql
         /// <returns>true if an asynchronous message was received, false if timed out.</returns>
         public bool Wait(int timeout)
         {
+            throw new NotImplementedException();
+#if MULTIPLEXING
             if (timeout != -1 && timeout < 0)
                 throw new ArgumentException("Argument must be -1, 0 or positive", nameof(timeout));
 
-            var connector = CheckConnectionOpen();
+            var connector = CheckConnectionOpen();  // TODO: Not just open, ready...
             Log.Debug($"Starting to wait (timeout={timeout})...", connector.Id);
 
             return connector.Wait(timeout);
+#endif
         }
 
         /// <summary>
@@ -1209,12 +1237,15 @@ namespace Npgsql
         [PublicAPI]
         public Task WaitAsync(CancellationToken cancellationToken = default)
         {
+            throw new NotImplementedException();
+#if MULTIPLEXING
             if (cancellationToken.IsCancellationRequested)
                 return Task.FromCanceled(cancellationToken);
 
-            var connector = CheckConnectionOpen();
+            var connector = CheckConnectionOpen();  // TODO: Not just open, ready...
             Log.Debug("Starting to wait asynchronously...", connector.Id);
             return connector.WaitAsync(cancellationToken);
+#endif
         }
 
         #endregion
@@ -1225,15 +1256,42 @@ namespace Npgsql
         NpgsqlConnector CheckConnectionOpen()
         {
             CheckDisposed();
-            return Connector ?? throw new InvalidOperationException("Connection is not open");
+
+            switch (State)
+            {
+            case ConnectionState.Open:
+            case ConnectionState.Executing:
+            case ConnectionState.Fetching:
+                break;
+            case ConnectionState.Closed:
+            case ConnectionState.Broken:
+            case ConnectionState.Connecting:
+                throw new InvalidOperationException("Connection is not open");
+            default:
+                throw new ArgumentOutOfRangeException();
+            }
+
+            return Connector;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         void CheckConnectionClosed()
         {
             CheckDisposed();
-            if (Connector != null)
+
+            switch (State)
+            {
+            case ConnectionState.Closed:
+            case ConnectionState.Broken:
+                break;
+            case ConnectionState.Open:
+            case ConnectionState.Connecting:
+            case ConnectionState.Executing:
+            case ConnectionState.Fetching:
                 throw new InvalidOperationException("Connection already open");
+            default:
+                throw new ArgumentOutOfRangeException();
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1244,17 +1302,24 @@ namespace Npgsql
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal NpgsqlConnector CheckReadyAndGetConnector()
+        void CheckReady()
         {
             CheckDisposed();
 
-            // This method gets called outside any lock, and might be in a race condition
-            // with an ongoing keepalive, which may break the connector (setting the connection's
-            // Connector to null). We capture the connector to the stack and return it here.
-            var conn = Connector;
-            if (conn == null)
+            switch (State)
+            {
+            case ConnectionState.Open:
+                break;
+            case ConnectionState.Closed:
+            case ConnectionState.Broken:
+            case ConnectionState.Connecting:
                 throw new InvalidOperationException("Connection is not open");
-            return conn;
+            case ConnectionState.Executing:
+            case ConnectionState.Fetching:
+                throw new InvalidOperationException("Connection is busy");
+            default:
+                throw new ArgumentOutOfRangeException();
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1382,9 +1447,12 @@ namespace Npgsql
         [PublicAPI]
         public void UnprepareAll()
         {
-            var connector = CheckReadyAndGetConnector();
+            throw new NotImplementedException();
+#if MULTIPLEXING
+            var connector = CheckReadyAndBindIfNecessary();
             using (connector.StartUserAction())
                 connector.UnprepareAll();
+#endif
         }
 
         /// <summary>
@@ -1393,12 +1461,30 @@ namespace Npgsql
         /// </summary>
         public void ReloadTypes()
         {
-            var conn = CheckReadyAndGetConnector();
-            NpgsqlDatabaseInfo.Cache.TryRemove(_connectionString, out var _);
+            var conn = CheckReadyAndBindIfNecessary();
+            NpgsqlDatabaseInfo.Cache.TryRemove(_connectionString, out _);
             conn.LoadDatabaseInfo(NpgsqlTimeout.Infinite, false).GetAwaiter().GetResult();
             // Increment the change counter on the global type mapper. This will make conn.Open() pick up the
             // new DatabaseInfo and set up a new connection type mapper
             TypeMapping.GlobalTypeMapper.Instance.RecordChange();
+        }
+
+        enum ConnectorBindingTime
+        {
+            /// <summary>
+            /// The connection was bound to its connector during <see cref="Open"/> (i.e. non-multiplexed connection
+            /// or auto-enlist).
+            /// </summary>
+            Open,
+            /// <summary>
+            /// The connection was bound to its connector during <see cref="NpgsqlConnection.BeginTransaction()"/>
+            /// or <see cref="NpgsqlConnection.EnlistTransaction"/>.
+            /// </summary>
+            StartTransaction,
+            /// <summary>
+            /// The connection was bound to its connector during the start of a COPY operation.
+            /// </summary>
+            StartCopy
         }
 
         #endregion Misc
