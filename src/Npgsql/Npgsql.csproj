@@ -5,7 +5,7 @@
     <PackageTags>npgsql postgresql postgres ado ado.net database sql</PackageTags>
     <!-- At this point we target netcoreapp3.0 to avoid taking a dependency on System.Text.Json, which is
          necessary for all other TFMs. -->
-    <TargetFramework>netcoreapp3.0</TargetFramework>
+    <TargetFrameworks>net461;netstandard2.0;netcoreapp3.1</TargetFrameworks>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>

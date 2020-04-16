@@ -628,7 +628,11 @@ namespace Npgsql
                 // threshold exceeded).
                 // For the TE prototype this never occurs, so don't care.
                 var task = command.WriteExecute(connector, async: true);
+#if NETCOREAPP
                 if (!task.IsCompletedSuccessfully)
+#else
+                if (task.IsFaulted || !task.IsCompleted)
+#endif
                     throw new Exception("When writing Execute to connector, task is in state" + task.Status);
                 Interlocked.Increment(ref connector.CommandsInFlightCount);
             }
