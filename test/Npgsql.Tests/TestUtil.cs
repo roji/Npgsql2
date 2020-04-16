@@ -159,7 +159,7 @@ namespace Npgsql.Tests
 
     public static class NpgsqlCommandExtensions
     {
-        public static T ExecuteScalar<T>(this NpgsqlCommand cmd)
+        public static T ExecuteScalar<T>(this NpgsqlCommand cmd) where T : struct
         {
             using (var rdr = cmd.ExecuteReader())
                 return rdr.Read() ? rdr.GetFieldValue<T>(0) : default;

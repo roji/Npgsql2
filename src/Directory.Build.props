@@ -4,6 +4,7 @@
   <PropertyGroup>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Nullable>annotations</Nullable>
   </PropertyGroup>
 
   <!-- Build configuration -->
