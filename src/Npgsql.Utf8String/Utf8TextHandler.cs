@@ -1,10 +1,7 @@
 using System;
-using System.Text;
-using System.Text.Utf8;
 using System.Threading.Tasks;
 using Npgsql.BackendMessages;
 using Npgsql.PostgresTypes;
-using Npgsql.TypeHandlers.DateTimeHandlers;
 using Npgsql.TypeHandling;
 
 #pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
@@ -37,14 +34,14 @@ namespace Npgsql
         public override int ValidateAndGetLength(Utf8String value, ref NpgsqlLengthCache? lengthCache,  NpgsqlParameter? parameter)
         {
             // TODO: truncating via parameter.Size, but is that bytes or chars...
-            return value.Bytes.Length;
+            return value.Length;
         }
 
         public override Task Write(Utf8String value, NpgsqlWriteBuffer buf, NpgsqlLengthCache? lengthCache,
             NpgsqlParameter? parameter,
             bool async)
         {
-            var span = value.Bytes;
+            var span = value.AsBytes();
 
             // The entire string fits in our buffer, copy it as usual.
             if (span.Length <= buf.WriteSpaceLeft)
@@ -60,7 +57,7 @@ namespace Npgsql
                 // The segment is larger than our buffer. Flush whatever is currently in the buffer and
                 // write the array directly to the socket.
                 await buf.Flush(async);
-                await buf.DirectWrite(value.Memory, async);
+                await buf.DirectWrite(value.AsMemoryBytes(), async);
             }
         }
     }

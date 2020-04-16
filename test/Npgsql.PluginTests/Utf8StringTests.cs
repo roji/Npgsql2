@@ -1,6 +1,6 @@
 #if !NET461
 
-using System.Text.Utf8;
+using System;
 using System.Threading.Tasks;
 using Npgsql.Tests;
 using NUnit.Framework;
