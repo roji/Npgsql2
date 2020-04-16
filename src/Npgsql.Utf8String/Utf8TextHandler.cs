@@ -34,7 +34,7 @@ namespace Npgsql
         public override int ValidateAndGetLength(Utf8String value, ref NpgsqlLengthCache? lengthCache,  NpgsqlParameter? parameter)
         {
             // TODO: truncating via parameter.Size, but is that bytes or chars...
-            return value.Length;
+            return value.AsBytes().Length;
         }
 
         public override Task Write(Utf8String value, NpgsqlWriteBuffer buf, NpgsqlLengthCache? lengthCache,
