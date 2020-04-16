@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netstandard2.1</TargetFramework>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="System.Text.Utf8String" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Npgsql\Npgsql.csproj" />
+    </ItemGroup>
+</Project>

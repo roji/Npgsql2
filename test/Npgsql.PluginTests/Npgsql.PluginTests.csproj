@@ -8,6 +8,7 @@
     <PackageReference Include="NLog" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="NUnit3TestAdapter" />
+    <PackageReference Include="System.Text.Utf8String" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Npgsql/Npgsql.csproj" />
@@ -18,5 +19,6 @@
     <ProjectReference Include="../../src/Npgsql.RawPostgis/Npgsql.RawPostgis.csproj" />
     <ProjectReference Include="../../src/Npgsql.NetTopologySuite/Npgsql.NetTopologySuite.csproj" />
     <ProjectReference Include="../../src/Npgsql.GeoJSON/Npgsql.GeoJSON.csproj" />
+    <ProjectReference Include="../../src/Npgsql.Utf8String/Npgsql.Utf8String.csproj" Condition="'$(TargetFramework)' != 'net461'" />
   </ItemGroup>
 </Project>

@@ -35,6 +35,8 @@ ProjectSection(SolutionItems) = preProject
 	Directory.Build.targets = Directory.Build.targets
 EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Npgsql.Utf8String", "src\Npgsql.Utf8String\Npgsql.Utf8String.csproj", "{8E6DC342-81A6-4239-87BA-9AC15512522A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -131,6 +133,14 @@ Global
 		{A77E5FAF-D775-4AB4-8846-8965C2104E60}.Release|Any CPU.Build.0 = Release|Any CPU
 		{A77E5FAF-D775-4AB4-8846-8965C2104E60}.Release|x86.ActiveCfg = Release|Any CPU
 		{A77E5FAF-D775-4AB4-8846-8965C2104E60}.Release|x86.Build.0 = Release|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Debug|x86.Build.0 = Debug|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Release|x86.ActiveCfg = Release|Any CPU
+		{8E6DC342-81A6-4239-87BA-9AC15512522A}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -147,6 +157,7 @@ Global
 		{6CB12050-DC9B-4155-BADD-BFDD54CDD70F} = {8537E50E-CF7F-49CB-B4EF-3E2A1B11F050}
 		{F7C53EBD-0075-474F-A083-419257D04080} = {8537E50E-CF7F-49CB-B4EF-3E2A1B11F050}
 		{A77E5FAF-D775-4AB4-8846-8965C2104E60} = {ED612DB1-AB32-4603-95E7-891BACA71C39}
+		{8E6DC342-81A6-4239-87BA-9AC15512522A} = {8537E50E-CF7F-49CB-B4EF-3E2A1B11F050}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {C90AEECD-DB4C-4BE6-B506-16A449852FB8}

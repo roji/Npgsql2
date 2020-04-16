@@ -178,7 +178,7 @@ namespace Npgsql
         }
 
 #if !NETSTANDARD2_0 && !NET461
-        internal async Task DirectWrite(ReadOnlyMemory<byte> memory, bool async)
+        public async Task DirectWrite(ReadOnlyMemory<byte> memory, bool async)
         {
             await Flush(async);
 
