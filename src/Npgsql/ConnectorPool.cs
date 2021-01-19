@@ -149,7 +149,7 @@ namespace Npgsql
                 _writeCoalescingDelayTicks = Settings.WriteCoalescingDelayUs * 100;
                 _writeCoalescingBufferThresholdBytes = Settings.WriteCoalescingBufferThresholdBytes;
 
-                var multiplexCommandChannel = Channel.CreateBounded<NpgsqlCommand>(
+                var multiplexCommandChannel = Channel.CreateBounded<IExecutable>(
                     new BoundedChannelOptions(MultiexingCommandChannelBound)
                     {
                         FullMode = BoundedChannelFullMode.Wait,

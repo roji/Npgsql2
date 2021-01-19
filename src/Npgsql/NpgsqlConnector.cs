@@ -341,7 +341,7 @@ namespace Npgsql
                 // Note: the in-flight channel can probably be single-writer, but that doesn't actually do anything
                 // at this point. And we currently rely on being able to complete the channel at any point (from
                 // Break). We may want to revisit this if an optimized, SingleWriter implementation is introduced.
-                var commandsInFlightChannel = Channel.CreateUnbounded<NpgsqlCommand>(
+                var commandsInFlightChannel = Channel.CreateUnbounded<IExecutable>(
                     new UnboundedChannelOptions { SingleReader = true });
                 CommandsInFlightReader = commandsInFlightChannel.Reader;
                 CommandsInFlightWriter = commandsInFlightChannel.Writer;
@@ -956,8 +956,8 @@ namespace Npgsql
 
         #region I/O
 
-        internal readonly ChannelReader<NpgsqlCommand>? CommandsInFlightReader;
-        internal readonly ChannelWriter<NpgsqlCommand>? CommandsInFlightWriter;
+        internal readonly ChannelReader<IExecutable>? CommandsInFlightReader;
+        internal readonly ChannelWriter<IExecutable>? CommandsInFlightWriter;
 
         internal volatile int CommandsInFlightCount;
 
@@ -969,7 +969,7 @@ namespace Npgsql
             Debug.Assert(Settings.Multiplexing);
             Debug.Assert(CommandsInFlightReader != null);
 
-            NpgsqlCommand? command = null;
+            IExecutable? command = null;
             var commandsRead = 0;
 
             try
@@ -1780,7 +1780,7 @@ namespace Npgsql
 
             if (CurrentReader != null)
             {
-                CurrentReader.Command.State = CommandState.Idle;
+                CurrentReader.Executable.State = CommandState.Idle;
                 try
                 {
                     // Will never complete asynchronously (stream is already closed)

@@ -11,8 +11,8 @@ namespace Npgsql
 {
     sealed partial class ConnectorPool
     {
-        readonly ChannelReader<NpgsqlCommand>? _multiplexCommandReader;
-        internal ChannelWriter<NpgsqlCommand>? MultiplexCommandWriter { get; }
+        readonly ChannelReader<IExecutable>? _multiplexCommandReader;
+        internal ChannelWriter<IExecutable>? MultiplexCommandWriter { get; }
 
         const int WriteCoalescineDelayAdaptivityUs = 10;
 
@@ -96,8 +96,8 @@ namespace Npgsql
                 NpgsqlConnector? connector;
 
                 // Get a first command out.
-                if (!_multiplexCommandReader.TryRead(out var command))
-                    command = await _multiplexCommandReader.ReadAsync();
+                if (!_multiplexCommandReader.TryRead(out var executable))
+                    executable = await _multiplexCommandReader.ReadAsync();
 
                 try
                 {
@@ -113,7 +113,7 @@ namespace Npgsql
                         }
 
                         connector = await OpenNewConnector(
-                            command.Connection!,
+                            executable.Connection!,
                             new NpgsqlTimeout(TimeSpan.FromSeconds(Settings.Timeout)),
                             async: true,
                             CancellationToken.None);
@@ -176,7 +176,7 @@ namespace Npgsql
                     Log.Error("Exception opening a connection", ex);
 
                     // Fail the first command in the channel as a way of bubbling the exception up to the user
-                    command.ExecutionCompletion.SetException(ex);
+                    executable.ExecutionCompletion.SetException(ex);
 
                     continue;
                 }
@@ -193,16 +193,16 @@ namespace Npgsql
                     // under our write threshold and timer delay.
                     // Note we already have one command we read above, and have already updated the connector's
                     // CommandsInFlightCount. Now write that command.
-                    var writtenSynchronously = WriteCommand(connector, command, ref stats);
+                    var writtenSynchronously = WriteExecutable(connector, executable, ref stats);
 
                     if (timeout == 0)
                     {
                         while (connector.WriteBuffer.WritePosition < _writeCoalescingBufferThresholdBytes &&
                                writtenSynchronously &&
-                               _multiplexCommandReader.TryRead(out command))
+                               _multiplexCommandReader.TryRead(out executable))
                         {
                             Interlocked.Increment(ref connector.CommandsInFlightCount);
-                            writtenSynchronously = WriteCommand(connector, command, ref stats);
+                            writtenSynchronously = WriteExecutable(connector, executable, ref stats);
                         }
                     }
                     else
@@ -214,14 +214,14 @@ namespace Npgsql
                             while (connector.WriteBuffer.WritePosition < _writeCoalescingBufferThresholdBytes &&
                                    writtenSynchronously)
                             {
-                                if (!_multiplexCommandReader.TryRead(out command))
+                                if (!_multiplexCommandReader.TryRead(out executable))
                                 {
                                     stats.Waits++;
-                                    command = await _multiplexCommandReader.ReadAsync(timeoutToken);
+                                    executable = await _multiplexCommandReader.ReadAsync(timeoutToken);
                                 }
 
                                 Interlocked.Increment(ref connector.CommandsInFlightCount);
-                                writtenSynchronously = WriteCommand(connector, command, ref stats);
+                                writtenSynchronously = WriteExecutable(connector, executable, ref stats);
                             }
 
                             // The cancellation token (presumably!) has not fired, reset its timer so
@@ -253,39 +253,21 @@ namespace Npgsql
                 }
             }
 
-            bool WriteCommand(NpgsqlConnector connector, NpgsqlCommand command, ref MultiplexingStats stats)
+            bool WriteExecutable(NpgsqlConnector connector, IExecutable executable, ref MultiplexingStats stats)
             {
                 // Note: this method *never* awaits on I/O - doing so would suspend all outgoing multiplexing commands
                 // for the entire pool. In the normal/fast case, writing the command is purely synchronous (serialize
                 // to buffer in memory), and the actual flush will occur at the level above. For cases where the
                 // command overflows the buffer, async I/O is done, and we schedule continuations separately -
                 // but the main thread continues to handle other commands on other connectors.
-                if (_autoPrepare)
-                {
-                    var numPrepared = 0;
-                    foreach (var statement in command._statements)
-                    {
-                        // If this statement isn't prepared, see if it gets implicitly prepared.
-                        // Note that this may return null (not enough usages for automatic preparation).
-                        if (!statement.IsPrepared)
-                            statement.PreparedStatement = connector.PreparedStatementManager.TryGetAutoPrepared(statement);
-                        if (statement.PreparedStatement is PreparedStatement pStatement)
-                        {
-                            numPrepared++;
-                            if (pStatement?.State == PreparedState.NotPrepared)
-                            {
-                                pStatement.State = PreparedState.BeingPrepared;
-                                statement.IsPreparing = true;
-                            }
-                        }
-                    }
-                }
 
-                var written = connector.CommandsInFlightWriter!.TryWrite(command);
+                executable.AutoPrepare(connector);
+
+                var written = connector.CommandsInFlightWriter!.TryWrite(executable);
                 Debug.Assert(written, $"Failed to enqueue command to {connector.CommandsInFlightWriter}");
 
                 // Purposefully don't wait for I/O to complete
-                var task = command.Write(connector, async: true);
+                var task = executable.SendExecute(connector, async: true, CancellationToken.None);
                 stats.NumCommands++;
 
                 switch (task.Status)

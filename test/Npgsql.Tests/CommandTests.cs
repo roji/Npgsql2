@@ -1,9 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Data;
-using System.IO;
 using System.Linq;
-using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,65 +16,6 @@ namespace Npgsql.Tests
     public class CommandTests : MultiplexingTestBase
     {
         #region Multiple Statements in a Command
-
-        /// <summary>
-        /// Tests various configurations of queries and non-queries within a multiquery
-        /// </summary>
-        [Test]
-        [TestCase(new[] { true }, TestName = "SingleQuery")]
-        [TestCase(new[] { false }, TestName = "SingleNonQuery")]
-        [TestCase(new[] { true, true }, TestName = "TwoQueries")]
-        [TestCase(new[] { false, false }, TestName = "TwoNonQueries")]
-        [TestCase(new[] { false, true }, TestName = "NonQueryQuery")]
-        [TestCase(new[] { true, false }, TestName = "QueryNonQuery")]
-        public async Task MultipleStatements(bool[] queries)
-        {
-            using var conn = await OpenConnectionAsync();
-            await using var _ = await CreateTempTable(conn, "name TEXT", out var table);
-            var sb = new StringBuilder();
-            foreach (var query in queries)
-                sb.Append(query ? "SELECT 1;" : $"UPDATE {table} SET name='yo' WHERE 1=0;");
-            var sql = sb.ToString();
-            foreach (var prepare in new[] { false, true })
-            {
-                using var cmd = new NpgsqlCommand(sql, conn);
-                if (prepare && !IsMultiplexing)
-                    cmd.Prepare();
-                using var reader = await cmd.ExecuteReaderAsync();
-                var numResultSets = queries.Count(q => q);
-                for (var i = 0; i < numResultSets; i++)
-                {
-                    Assert.That(reader.Read(), Is.True);
-                    Assert.That(reader[0], Is.EqualTo(1));
-                    Assert.That(reader.NextResult(), Is.EqualTo(i != numResultSets - 1));
-                }
-            }
-        }
-
-        [Test]
-        public async Task MultipleStatementsWithParameters([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare)
-        {
-            if (prepare == PrepareOrNot.Prepared && IsMultiplexing)
-                return;
-
-            using var conn = await OpenConnectionAsync();
-            using var cmd = new NpgsqlCommand("SELECT @p1; SELECT @p2", conn);
-            var p1 = new NpgsqlParameter("p1", NpgsqlDbType.Integer);
-            var p2 = new NpgsqlParameter("p2", NpgsqlDbType.Text);
-            cmd.Parameters.Add(p1);
-            cmd.Parameters.Add(p2);
-            if (prepare == PrepareOrNot.Prepared)
-                cmd.Prepare();
-            p1.Value = 8;
-            p2.Value = "foo";
-            using var reader = await cmd.ExecuteReaderAsync();
-            Assert.That(reader.Read(), Is.True);
-            Assert.That(reader.GetInt32(0), Is.EqualTo(8));
-            Assert.That(reader.NextResult(), Is.True);
-            Assert.That(reader.Read(), Is.True);
-            Assert.That(reader.GetString(0), Is.EqualTo("foo"));
-            Assert.That(reader.NextResult(), Is.False);
-        }
 
         [Test]
         public async Task MultipleStatementsSingleRow([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare)
@@ -490,6 +429,10 @@ namespace Npgsql.Tests
         }
 
         #endregion
+
+        [Test]
+        public void Default_CommandType_is_Text()
+            => Assert.That(new NpgsqlCommand().CommandType, Is.EqualTo(CommandType.Text));
 
         [Test]
         public async Task SingleRow([Values(PrepareOrNot.NotPrepared, PrepareOrNot.Prepared)] PrepareOrNot prepare)
@@ -941,13 +884,13 @@ LANGUAGE 'plpgsql' VOLATILE;";
             {
                 Assert.That(() => cmd.Prepare(), Throws.Exception
                     .InstanceOf<NpgsqlException>()
-                    .With.Message.EqualTo("A statement cannot have more than 65535 parameters"));
+                    .With.Message.EqualTo("A single command cannot have more than 65535 parameters"));
             }
             else
             {
                 Assert.That(() => cmd.ExecuteNonQueryAsync(), Throws.Exception
                     .InstanceOf<NpgsqlException>()
-                    .With.Message.EqualTo("A statement cannot have more than 65535 parameters"));
+                    .With.Message.EqualTo("A single command cannot have more than 65535 parameters"));
             }
         }
 

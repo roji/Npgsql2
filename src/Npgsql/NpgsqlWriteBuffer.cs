@@ -166,10 +166,10 @@ namespace Npgsql
             //NpgsqlEventSource.Log.RequestFailed();
 
             WritePosition = 0;
-            if (CurrentCommand != null)
+            if (CurrentBatch != null)
             {
-                CurrentCommand.FlushOccurred = true;
-                CurrentCommand = null;
+                CurrentBatch.FlushOccurred = true;
+                CurrentBatch = null;
             }
             if (_copyMode)
                 WriteCopyDataHeader();
@@ -177,7 +177,7 @@ namespace Npgsql
 
         internal void Flush() => Flush(false).GetAwaiter().GetResult();
 
-        internal NpgsqlCommand? CurrentCommand { get; set; }
+        internal NpgsqlBatch? CurrentBatch { get; set; }
 
         #endregion
 

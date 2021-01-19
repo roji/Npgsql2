@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -466,6 +467,12 @@ namespace Npgsql.Tests
     {
         Prepared,
         NotPrepared
+    }
+
+    public enum BatchOrCommand
+    {
+        Batch,
+        Command
     }
 
     public enum PooledOrNot

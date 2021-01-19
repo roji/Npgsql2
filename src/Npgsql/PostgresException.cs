@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Runtime.Serialization;
 using System.Text;
 using Npgsql.BackendMessages;
@@ -233,6 +234,14 @@ namespace Npgsql
         /// Returns the statement which triggered this exception.
         /// </summary>
         public NpgsqlStatement? Statement { get; internal set; }
+
+#pragma warning disable RS0016
+        /// <summary>
+        /// Returns the <see cref="DbBatchCommand"/> within the <see cref="DbBatch"/> which triggered this exception.
+        /// <see langword="null"/> if this exception was not a result of batch execution.
+        /// </summary>
+        public DbBatchCommand? BatchCommand { get; internal set; }
+#pragma warning restore RS0016
 
         #region Message Fields
 

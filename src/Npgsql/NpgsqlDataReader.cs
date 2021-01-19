@@ -31,7 +31,10 @@ namespace Npgsql
     public sealed class NpgsqlDataReader : DbDataReader, IDbColumnSchemaGenerator
 #pragma warning restore CA1010
     {
-        internal NpgsqlCommand Command { get; private set; } = default!;
+        NpgsqlCommand? _command;
+        NpgsqlBatch? _batch;
+
+        internal IExecutable Executable { get; private set; } = default!;
         internal NpgsqlConnector Connector { get; }
         NpgsqlConnection _connection = default!;
 
@@ -53,8 +56,9 @@ namespace Npgsql
         /// <summary>
         /// Holds the list of statements being executed by this reader.
         /// </summary>
-        List<NpgsqlStatement> _statements = default!;
+        IList<NpgsqlBatchCommand> _batchCommands = default!;
 
+        // TODO: Rename
         /// <summary>
         /// The index of the current query resultset we're processing (within a multiquery)
         /// </summary>
@@ -142,19 +146,31 @@ namespace Npgsql
         static readonly NpgsqlLogger Log = NpgsqlLogManager.CreateLogger(nameof(NpgsqlDataReader));
 
         internal NpgsqlDataReader(NpgsqlConnector connector)
-        {
-            Connector = connector;
-        }
+            => Connector = connector;
 
-        internal void Init(
-            NpgsqlCommand command, CommandBehavior behavior, List<NpgsqlStatement> statements, Task? sendTask = null)
+        internal void Init(NpgsqlCommand command, CommandBehavior behavior)
         {
-            Command = command;
+            Executable = _command = command;
+            _batch = null;
             _connection = command.Connection!;
             _behavior = behavior;
             _isSchemaOnly = _behavior.HasFlag(CommandBehavior.SchemaOnly);
             _isSequential = _behavior.HasFlag(CommandBehavior.SequentialAccess);
-            _statements = statements;
+            StatementIndex = -1;
+            _sendTask = null;
+            State = ReaderState.BetweenResults;
+            _recordsAffected = null;
+        }
+
+        internal void Init(NpgsqlBatch batch, CommandBehavior behavior, Task? sendTask = null)
+        {
+            Executable = _batch = batch;
+            _command = null;
+            _connection = batch.Connection!;
+            _behavior = behavior;
+            _isSchemaOnly = _behavior.HasFlag(CommandBehavior.SchemaOnly);
+            _isSequential = _behavior.HasFlag(CommandBehavior.SequentialAccess);
+            _batchCommands = batch.BatchCommands;
             StatementIndex = -1;
             _sendTask = sendTask;
             State = ReaderState.BetweenResults;
@@ -315,8 +331,18 @@ namespace Npgsql
         /// Advances the reader to the next result when reading the results of a batch of statements.
         /// </summary>
         /// <returns></returns>
-        public override bool NextResult() => (_isSchemaOnly ? NextResultSchemaOnly(false) : NextResult(false))
-            .GetAwaiter().GetResult();
+        public override bool NextResult()
+        {
+            if (_isSchemaOnly)
+                throw new NotImplementedException();
+
+            // return (_isSchemaOnly ? NextResultSchemaOnly(false) : NextResult(false))
+            //     .GetAwaiter().GetResult();
+
+            return (_batch is null
+                ? NextResultCommand(async: false)
+                : NextResultBatch(async: false)).GetAwaiter().GetResult();
+        }
 
         /// <summary>
         /// This is the asynchronous version of NextResult.
@@ -327,17 +353,189 @@ namespace Npgsql
         /// <returns>A task representing the asynchronous operation.</returns>
         public override Task<bool> NextResultAsync(CancellationToken cancellationToken)
         {
+            if (_isSchemaOnly)
+                throw new NotImplementedException();
+
             using (NoSynchronizationContextScope.Enter())
-                return _isSchemaOnly
-                    ? NextResultSchemaOnly(async: true, cancellationToken: cancellationToken)
-                    : NextResult(async: true, cancellationToken: cancellationToken);
+            {
+                return _batch is null
+                    ? NextResultCommand(async: true, cancellationToken: cancellationToken)
+                    : NextResultBatch(async: true, cancellationToken: cancellationToken);
+                // return _isSchemaOnly
+                //     ? NextResultSchemaOnly(async: true, cancellationToken: cancellationToken)
+                //     : NextResult(async: true, cancellationToken: cancellationToken);
+            }
         }
 
-        /// <summary>
-        /// Internal implementation of NextResult
-        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        async Task<bool> NextResult(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
+        async Task<bool> NextResultCommand(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
+        {
+            Debug.Assert(_command is not null);
+
+            CheckClosedOrDisposed();
+
+            IBackendMessage msg;
+            Debug.Assert(!_isSchemaOnly);
+
+            using var registration = isConsuming ? default : Connector.StartNestedCancellableOperation(cancellationToken);
+
+            try
+            {
+                // If we're in the middle of a resultset, consume it
+                switch (State)
+                {
+                case ReaderState.BeforeResult:
+                case ReaderState.InResult:
+                    await ConsumeRow(async);
+                    while (true)
+                    {
+                        var completedMsg = await Connector.ReadMessage(async, DataRowLoadingMode.Skip);
+                        switch (completedMsg.Code)
+                        {
+                        case BackendMessageCode.CommandComplete:
+                        case BackendMessageCode.EmptyQueryResponse:
+                            ProcessMessage(completedMsg);
+                            break;
+                        default:
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    ProcessMessage(Expect<ReadyForQueryMessage>(await Connector.ReadMessage(async), Connector));
+                    RowDescription = null;
+                    return false;
+
+                case ReaderState.BetweenResults:
+                    break;
+
+                case ReaderState.Consumed:
+                case ReaderState.Closed:
+                case ReaderState.Disposed:
+                    return false;
+                default:
+                    throw new ArgumentOutOfRangeException();
+                }
+
+                Debug.Assert(State == ReaderState.BetweenResults);
+                _hasRows = false;
+
+                // TODO: Investigate
+                for (StatementIndex++; StatementIndex < 1; StatementIndex++)
+                {
+                    if (_command.IsPrepared)
+                    {
+                        Expect<BindCompleteMessage>(await Connector.ReadMessage(async), Connector);
+                        RowDescription = _command.Description;
+                    }
+                    else // Non-prepared/preparing flow
+                    {
+                        var pStatement = _command.PreparedStatement;
+                        if (pStatement != null)
+                        {
+                            Debug.Assert(!pStatement.IsPrepared);
+                            if (pStatement.StatementBeingReplaced != null)
+                            {
+                                Expect<CloseCompletedMessage>(await Connector.ReadMessage(async), Connector);
+                                pStatement.StatementBeingReplaced.CompleteUnprepare();
+                                pStatement.StatementBeingReplaced = null;
+                            }
+                        }
+
+                        Expect<ParseCompleteMessage>(await Connector.ReadMessage(async), Connector);
+                        Expect<BindCompleteMessage>(await Connector.ReadMessage(async), Connector);
+                        msg = await Connector.ReadMessage(async);
+
+                        RowDescription = _command.Description = msg.Code switch
+                        {
+                            BackendMessageCode.NoData => null,
+
+                            // RowDescription messages are cached on the connector, but if we're auto-preparing, we need to
+                            // clone our own copy which will last beyond the lifetime of this invocation.
+                            BackendMessageCode.RowDescription => pStatement == null
+                                ? (RowDescriptionMessage)msg
+                                : ((RowDescriptionMessage)msg).Clone(),
+
+                            _ => throw Connector.UnexpectedMessageReceived(msg.Code)
+                        };
+
+                        if (_command.IsPreparing)
+                        {
+                            _command.IsPreparing = false;
+                            pStatement!.CompletePrepare();
+                        }
+                    }
+
+                    if (RowDescription == null)
+                    {
+                        // Statement did not generate a resultset (e.g. INSERT)
+                        // Read and process its completion message and move on to the next statement
+
+                        msg = await ReadMessage(async);
+                        switch (msg.Code)
+                        {
+                        case BackendMessageCode.CommandComplete:
+                        case BackendMessageCode.EmptyQueryResponse:
+                            break;
+                        default:
+                            throw Connector.UnexpectedMessageReceived(msg.Code);
+                        }
+
+                        ProcessMessage(msg);
+                        continue;
+                    }
+
+                    // TODO: Implement
+                    // if (StatementIndex == 0 && Executable.Parameters.HasOutputParameters)
+                    // {
+                    //     // If output parameters are present and this is the first row of the first resultset,
+                    //     // we must always read it in non-sequential mode because it will be traversed twice (once
+                    //     // here for the parameters, then as a regular row).
+                    //     msg = await Connector.ReadMessage(async);
+                    //     ProcessMessage(msg);
+                    //     if (msg.Code == BackendMessageCode.DataRow)
+                    //         PopulateOutputParameters();
+                    // }
+                    // else
+                    {
+                        msg = await ReadMessage(async);
+                        ProcessMessage(msg);
+                    }
+
+                    switch (msg.Code)
+                    {
+                    case BackendMessageCode.DataRow:
+                    case BackendMessageCode.CommandComplete:
+                        break;
+                    default:
+                        throw Connector.UnexpectedMessageReceived(msg.Code);
+                    }
+
+                    return true;
+                }
+
+                // We're done. Read the RFQ.
+                ProcessMessage(Expect<ReadyForQueryMessage>(await Connector.ReadMessage(async), Connector));
+                RowDescription = null;
+                return false;
+            }
+            catch
+            {
+                State = ReaderState.Consumed;
+
+                if (_command.IsPreparing)
+                {
+                    _command.IsPreparing = false;
+                    _command.PreparedStatement!.CompleteUnprepare();
+                }
+
+                throw;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        async Task<bool> NextResultBatch(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
         {
             CheckClosedOrDisposed();
 
@@ -395,9 +593,9 @@ namespace Npgsql
                 // We are now at the end of the previous result set. Read up to the next result set, if any.
                 // Non-prepared statements receive ParseComplete, BindComplete, DescriptionRow/NoData,
                 // prepared statements receive only BindComplete
-                for (StatementIndex++; StatementIndex < _statements.Count; StatementIndex++)
+                for (StatementIndex++; StatementIndex < _batchCommands.Count; StatementIndex++)
                 {
-                    var statement = _statements[StatementIndex];
+                    var statement = _batchCommands[StatementIndex];
 
                     if (statement.IsPrepared)
                     {
@@ -461,21 +659,8 @@ namespace Npgsql
                         continue;
                     }
 
-                    if (StatementIndex == 0 && Command.Parameters.HasOutputParameters)
-                    {
-                        // If output parameters are present and this is the first row of the first resultset,
-                        // we must always read it in non-sequential mode because it will be traversed twice (once
-                        // here for the parameters, then as a regular row).
-                        msg = await Connector.ReadMessage(async);
-                        ProcessMessage(msg);
-                        if (msg.Code == BackendMessageCode.DataRow)
-                            PopulateOutputParameters();
-                    }
-                    else
-                    {
-                        msg = await ReadMessage(async);
-                        ProcessMessage(msg);
-                    }
+                    msg = await ReadMessage(async);
+                    ProcessMessage(msg);
 
                     switch (msg.Code)
                     {
@@ -500,17 +685,17 @@ namespace Npgsql
 
                 // Reference the triggering statement from the exception (for batching)
                 if (e is PostgresException postgresException &&
-                    StatementIndex >= 0 && StatementIndex < _statements.Count)
+                    StatementIndex >= 0 && StatementIndex < _batchCommands.Count)
                 {
-                    postgresException.Statement = _statements[StatementIndex];
+                    postgresException.BatchCommand = _batchCommands[StatementIndex];
                 }
 
                 // An error means all subsequent statements were skipped by PostgreSQL.
                 // If any of them were being prepared, we need to update our bookkeeping to put
                 // them back in unprepared state.
-                for (; StatementIndex < _statements.Count; StatementIndex++)
+                for (; StatementIndex < _batchCommands.Count; StatementIndex++)
                 {
-                    var statement = _statements[StatementIndex];
+                    var statement = _batchCommands[StatementIndex];
                     if (statement.IsPreparing)
                     {
                         statement.IsPreparing = false;
@@ -524,48 +709,48 @@ namespace Npgsql
 
         void PopulateOutputParameters()
         {
-            // The first row in a stored procedure command that has output parameters needs to be traversed twice -
-            // once for populating the output parameters and once for the actual result set traversal. So in this
-            // case we can't be sequential.
-            Debug.Assert(Command.Parameters.Any(p => p.IsOutputDirection));
-            Debug.Assert(StatementIndex == 0);
-            Debug.Assert(RowDescription != null);
-            Debug.Assert(State == ReaderState.BeforeResult);
-
-            var currentPosition = Buffer.ReadPosition;
-
-            // Temporarily set our state to InResult to allow us to read the values
-            State = ReaderState.InResult;
-
-            var pending = new Queue<object>();
-            var taken = new List<NpgsqlParameter>();
-            for (var i = 0; i < FieldCount; i++)
-            {
-                if (Command.Parameters.TryGetValue(GetName(i), out var p) && p.IsOutputDirection)
-                {
-                    p.Value = GetValue(i);
-                    taken.Add(p);
-                }
-                else
-                    pending.Enqueue(GetValue(i));
-            }
-
-            // Not sure where this odd behavior comes from: all output parameters which did not get matched by
-            // name now get populated with column values which weren't matched. Keeping this for backwards compat,
-            // opened #2252 for investigation.
-            foreach (var p in Command.Parameters.Where(p => p.IsOutputDirection && !taken.Contains(p)))
-            {
-                if (pending.Count == 0)
-                    break;
-                p.Value = pending.Dequeue();
-            }
-
-            State = ReaderState.BeforeResult; // Set the state back
-            Buffer.ReadPosition = currentPosition; // Restore position
-
-            _column = -1;
-            ColumnLen = -1;
-            PosInColumn = 0;
+            // // The first row in a stored procedure command that has output parameters needs to be traversed twice -
+            // // once for populating the output parameters and once for the actual result set traversal. So in this
+            // // case we can't be sequential.
+            // Debug.Assert(Executable.Parameters.Any(p => p.IsOutputDirection));
+            // Debug.Assert(StatementIndex == 0);
+            // Debug.Assert(RowDescription != null);
+            // Debug.Assert(State == ReaderState.BeforeResult);
+            //
+            // var currentPosition = Buffer.ReadPosition;
+            //
+            // // Temporarily set our state to InResult to allow us to read the values
+            // State = ReaderState.InResult;
+            //
+            // var pending = new Queue<object>();
+            // var taken = new List<NpgsqlParameter>();
+            // for (var i = 0; i < FieldCount; i++)
+            // {
+            //     if (Executable.Parameters.TryGetValue(GetName(i), out var p) && p.IsOutputDirection)
+            //     {
+            //         p.Value = GetValue(i);
+            //         taken.Add(p);
+            //     }
+            //     else
+            //         pending.Enqueue(GetValue(i));
+            // }
+            //
+            // // Not sure where this odd behavior comes from: all output parameters which did not get matched by
+            // // name now get populated with column values which weren't matched. Keeping this for backwards compat,
+            // // opened #2252 for investigation.
+            // foreach (var p in Executable.Parameters.Where(p => p.IsOutputDirection && !taken.Contains(p)))
+            // {
+            //     if (pending.Count == 0)
+            //         break;
+            //     p.Value = pending.Dequeue();
+            // }
+            //
+            // State = ReaderState.BeforeResult; // Set the state back
+            // Buffer.ReadPosition = currentPosition; // Restore position
+            //
+            // _column = -1;
+            // ColumnLen = -1;
+            // PosInColumn = 0;
         }
 
         /// <summary>
@@ -594,14 +779,14 @@ namespace Npgsql
                     throw new ArgumentOutOfRangeException();
                 }
 
-                for (StatementIndex++; StatementIndex < _statements.Count; StatementIndex++)
+                for (StatementIndex++; StatementIndex < _batchCommands.Count; StatementIndex++)
                 {
-                    var statement = _statements[StatementIndex];
+                    var statement = _batchCommands[StatementIndex];
                     if (statement.IsPrepared)
                     {
                         // Row descriptions have already been populated in the statement objects at the
                         // Prepare phase
-                        RowDescription = _statements[StatementIndex].Description;
+                        RowDescription = _batchCommands[StatementIndex].Description;
                     }
                     else
                     {
@@ -611,12 +796,13 @@ namespace Npgsql
                         switch (msg.Code)
                         {
                         case BackendMessageCode.NoData:
-                            RowDescription = _statements[StatementIndex].Description = null;
+                            RowDescription = _batchCommands[StatementIndex].Description = null;
                             break;
                         case BackendMessageCode.RowDescription:
                             // We have a resultset
-                            RowDescription = _statements[StatementIndex].Description = (RowDescriptionMessage)msg;
-                            Command.FixupRowDescription(RowDescription, StatementIndex == 0);
+                            RowDescription = _batchCommands[StatementIndex].Description = (RowDescriptionMessage)msg;
+                            // TODO: Implement
+                            // Executable.FixupRowDescription(RowDescription, StatementIndex == 0);
                             break;
                         default:
                             throw Connector.UnexpectedMessageReceived(msg.Code);
@@ -629,7 +815,7 @@ namespace Npgsql
                 }
 
                 // There are no more queries, we're done. Read to the RFQ.
-                if (!_statements.All(s => s.IsPrepared))
+                if (!_batchCommands.All(s => s.IsPrepared))
                 {
                     ProcessMessage(Expect<ReadyForQueryMessage>(await Connector.ReadMessage(async), Connector));
                     RowDescription = null;
@@ -643,9 +829,9 @@ namespace Npgsql
 
                 // Reference the triggering statement from the exception (for batching)
                 if (e is PostgresException postgresException &&
-                    StatementIndex >= 0 && StatementIndex < _statements.Count)
+                    StatementIndex >= 0 && StatementIndex < _batchCommands.Count)
                 {
-                    postgresException.Statement = _statements[StatementIndex];
+                    postgresException.BatchCommand = _batchCommands[StatementIndex];
                 }
 
                 throw;
@@ -679,7 +865,10 @@ namespace Npgsql
                     break;
                 }
 
-                _statements[StatementIndex].ApplyCommandComplete(completed);
+                if (_batch is not null)
+                {
+                    _batchCommands[StatementIndex].ApplyCommandComplete(completed);
+                }
                 goto case BackendMessageCode.EmptyQueryResponse;
 
             case BackendMessageCode.EmptyQueryResponse:
@@ -772,7 +961,8 @@ namespace Npgsql
         /// a statement-by-statement basis, unlike <see cref="NpgsqlDataReader.RecordsAffected"/>
         /// which exposes an aggregation across all statements.
         /// </remarks>
-        public IReadOnlyList<NpgsqlStatement> Statements => _statements.AsReadOnly();
+        // public IReadOnlyList<NpgsqlStatement> Statements => _batchCommands.AsReadOnly();
+        public IReadOnlyList<NpgsqlStatement> Statements => throw new NotImplementedException();
 
         /// <summary>
         /// Gets a value that indicates whether this DbDataReader contains one or more rows.
@@ -822,7 +1012,13 @@ namespace Npgsql
             if (_isSchemaOnly)
                 while (await NextResultSchemaOnly(async, isConsuming: true)) {}
             else
-                while (await NextResult(async, isConsuming: true)) {}
+            {
+                // while (await NextResult(async, isConsuming: true)) {}
+                if (_batch is null)
+                    while (await NextResultCommand(async, isConsuming: true)) {}
+                else
+                    while (await NextResultBatch(async, isConsuming: true)) {}
+            }
         }
 
         /// <summary>
@@ -967,7 +1163,7 @@ namespace Npgsql
             }
 
             State = ReaderState.Closed;
-            Command.State = CommandState.Idle;
+            Executable.State = CommandState.Idle;
             Connector.CurrentReader = null;
             if (Log.IsEnabled(NpgsqlLogLevel.Debug)) {
                 Connector.QueryLogStopWatch.Stop();
@@ -1634,7 +1830,7 @@ namespace Npgsql
             }
 
             // Used for Entity Framework <= 6 compability
-            var objectResultType = Command.ObjectResultTypes?[ordinal];
+            var objectResultType = Executable.ObjectResultTypes?[ordinal];
             if (objectResultType != null)
             {
                 result = objectResultType == typeof(DateTimeOffset)
@@ -1798,7 +1994,7 @@ namespace Npgsql
         /// <param name="ordinal">The zero-based column ordinal.</param>
         /// <returns>The data type of the specified column.</returns>
         public override Type GetFieldType(int ordinal)
-            => Command.ObjectResultTypes?[ordinal]
+            => Executable.ObjectResultTypes?[ordinal]
                ?? CheckRowDescriptionAndGetField(ordinal).FieldType;
 
         /// <summary>

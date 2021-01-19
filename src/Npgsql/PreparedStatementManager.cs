@@ -49,10 +49,8 @@ namespace Npgsql
             }
         }
 
-        internal PreparedStatement? GetOrAddExplicit(NpgsqlStatement statement)
+        internal PreparedStatement? GetOrAddExplicit(string sql, List<NpgsqlParameter> parameters)
         {
-            var sql = statement.SQL;
-
             PreparedStatement? statementBeingReplaced = null;
             if (BySql.TryGetValue(sql, out var pStatement))
             {
@@ -62,7 +60,7 @@ namespace Npgsql
                     // Great, we've found an explicit prepared statement.
                     // We just need to check that the parameter types correspond, since prepared statements are
                     // only keyed by SQL (to prevent pointless allocations). If we have a mismatch, simply run unprepared.
-                    return pStatement.DoParametersMatch(statement.InputParameters)
+                    return pStatement.DoParametersMatch(parameters)
                         ? pStatement
                         : null;
                 }
@@ -86,12 +84,11 @@ namespace Npgsql
             }
 
             // Statement hasn't been prepared yet
-            return BySql[sql] = PreparedStatement.CreateExplicit(this, sql, NextPreparedStatementName(), statement.InputParameters, statementBeingReplaced);
+            return BySql[sql] = PreparedStatement.CreateExplicit(this, sql, NextPreparedStatementName(), parameters, statementBeingReplaced);
         }
 
-        internal PreparedStatement? TryGetAutoPrepared(NpgsqlStatement statement)
+        internal PreparedStatement? TryGetAutoPrepared(string sql, List<NpgsqlParameter> parameters)
         {
-            var sql = statement.SQL;
             if (!BySql.TryGetValue(sql, out var pStatement))
             {
                 // New candidate. Find an empty candidate slot or eject a least-used one.
@@ -139,7 +136,7 @@ namespace Npgsql
                 // for preparation (earlier identical statement in the same command).
                 // We just need to check that the parameter types correspond, since prepared statements are
                 // only keyed by SQL (to prevent pointless allocations). If we have a mismatch, simply run unprepared.
-                if (!pStatement.DoParametersMatch(statement.InputParameters))
+                if (!pStatement.DoParametersMatch(parameters))
                     return null;
                 // Prevent this statement from being replaced within this batch
                 pStatement.LastUsed = DateTime.MaxValue;
@@ -208,7 +205,7 @@ namespace Npgsql
             // Note that the parameter types are only set at the moment of preparation - in the candidate phase
             // there's no differentiation between overloaded statements, which are a pretty rare case, saving
             // allocations.
-            pStatement.SetParamTypes(statement.InputParameters);
+            pStatement.SetParamTypes(parameters);
 
             return pStatement;
         }

@@ -13,6 +13,8 @@ namespace Npgsql
         const int ThreadStayAliveMs = 10000;
         readonly string _threadName;
 
+        internal static readonly SingleThreadSynchronizationContext Instance = new("NpgsqlRemainingAsyncSendWorker");
+
         static readonly NpgsqlLogger Log = NpgsqlLogManager.CreateLogger(nameof(SingleThreadSynchronizationContext));
 
         internal SingleThreadSynchronizationContext(string threadName)

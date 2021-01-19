@@ -115,11 +115,15 @@ namespace Npgsql
         /// For arrays and ranges, join in the element OID and type (to filter out arrays of unhandled
         /// types).
         /// </remarks>
-        static string GenerateTypesQuery(bool withRange, bool withEnum, bool withEnumSortOrder,
-            bool loadTableComposites)
-            => $@"
-SELECT version();
+        static NpgsqlBatch GenerateTypesQuery(bool withRange, bool withEnum, bool withEnumSortOrder, bool loadTableComposites)
+        {
+            var batch = new NpgsqlBatch()
+            {
+                BatchCommands =
+                {
+                    new("SELECT version()"),
 
+                    new($@"
 SELECT ns.nspname, typ_and_elem_type.*,
    CASE
        WHEN typtype IN ('b', 'e', 'p') THEN 0           -- First base types, enums, pseudo-types
@@ -164,9 +168,11 @@ WHERE
         (elemtyptype = 'p' AND elemtypname IN ('record', 'void')) OR -- Arrays of special supported pseudo-types
         (elemtyptype = 'c' AND {(loadTableComposites ? "ns.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')" : "elemrelkind='c'")}) -- Array of user-defined free-standing composites (not table composites) by default
     ))
-ORDER BY ord;
+ORDER BY ord
+"),
 
--- Load field definitions for (free-standing) composite types
+                    // Load field definitions for (free-standing) composite types
+                    new($@"
 SELECT typ.oid, att.attname, att.atttypid
 FROM pg_type AS typ
 JOIN pg_namespace AS ns ON (ns.oid = typ.typnamespace)
@@ -176,15 +182,26 @@ WHERE
   (typ.typtype = 'c' AND {(loadTableComposites ? "ns.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')" : "cls.relkind='c'")}) AND
   attnum > 0 AND     -- Don't load system attributes
   NOT attisdropped
-ORDER BY typ.oid, att.attnum;
+ORDER BY typ.oid, att.attnum
+")
+                }
+            };
 
-{(withEnum ? $@"
--- Load enum fields
+            if (withEnum)
+            {
+                // Load enum fields
+                batch.BatchCommands.Add(new($@"
 SELECT pg_type.oid, enumlabel
 FROM pg_enum
 JOIN pg_type ON pg_type.oid=enumtypid
-ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")};" : "")}
-";
+ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")}"));
+            }
+
+            foreach (var batchCommand in batch.BatchCommands)
+                batchCommand.AllResultTypesAreUnknown = true;
+
+            return batch;
+        }
 
         /// <summary>
         /// Loads type information from the backend specified by <paramref name="conn"/>.
@@ -199,23 +216,21 @@ ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")};" : "")}
         /// <exception cref="ArgumentOutOfRangeException">Unknown typtype for type '{internalName}' in pg_type: {typeChar}.</exception>
         internal async Task<List<PostgresType>> LoadBackendTypes(NpgsqlConnection conn, NpgsqlTimeout timeout, bool async)
         {
-            var commandTimeout = 0;  // Default to infinity
+            var queryTimeout = 0;  // Default to infinity
             if (timeout.IsSet)
             {
-                commandTimeout = (int)timeout.TimeLeft.TotalSeconds;
-                if (commandTimeout <= 0)
+                queryTimeout = (int)timeout.TimeLeft.TotalSeconds;
+                if (queryTimeout <= 0)
                     throw new TimeoutException();
             }
 
-            var typeLoadingQuery = GenerateTypesQuery(SupportsRangeTypes, SupportsEnumTypes, HasEnumSortOrder, conn.Settings.LoadTableComposites);
-            using var command = new NpgsqlCommand(typeLoadingQuery, conn)
-            {
-                CommandTimeout = commandTimeout,
-                AllResultTypesAreUnknown = true
-            };
+            using var query = GenerateTypesQuery(
+                SupportsRangeTypes, SupportsEnumTypes, HasEnumSortOrder, conn.Settings.LoadTableComposites);
+            query.Connection = conn;
+            query.Timeout = queryTimeout;
 
             timeout.CheckAndApply(conn.Connector!);
-            using var reader = async ? await command.ExecuteReaderAsync() : command.ExecuteReader();
+            using var reader = async ? await query.ExecuteReaderAsync() : query.ExecuteReader();
             var byOID = new Dictionary<uint, PostgresType>();
 
             // First the PostgreSQL version
