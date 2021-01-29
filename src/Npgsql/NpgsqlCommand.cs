@@ -45,15 +45,13 @@ namespace Npgsql
         int? _timeout;
         readonly NpgsqlParameterCollection _parameters = new();
 
-        internal readonly List<NpgsqlStatement> _statements = new(1);
-
         NpgsqlBatch? _preparedBatch;
 
         /// <summary>
         /// Returns details about each statement that this command has executed.
         /// Is only populated when an Execute* method is called.
         /// </summary>
-        public IReadOnlyList<NpgsqlStatement> Statements => _statements.AsReadOnly();
+        public IReadOnlyList<NpgsqlStatement> Statements => throw new NotImplementedException();
 
         /// <summary>
         /// If this command has been prepared, references the <see cref="PreparedStatement"/>, otherwise <see langword="null" />.
@@ -677,35 +675,36 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 return Unprepare(true, cancellationToken);
         }
 
-        async Task Unprepare(bool async, CancellationToken cancellationToken = default)
+        Task Unprepare(bool async, CancellationToken cancellationToken = default)
         {
-            var connection = CheckAndGetConnection();
-            if (connection.Settings.Multiplexing)
-                throw new NotSupportedException("Explicit preparation not supported with multiplexing");
-            if (_statements.All(s => !s.IsPrepared))
-                return;
-
-            var connector = connection.Connector!;
-
-            Log.Debug("Closing command's prepared statements", connector.Id);
-            using (connector.StartUserAction(cancellationToken))
-            {
-                var sendTask = SendClose(connector, async, cancellationToken);
-                if (sendTask.IsFaulted)
-                    sendTask.GetAwaiter().GetResult();
-                foreach (var statement in _statements)
-                    if (statement.PreparedStatement?.State == PreparedState.BeingUnprepared)
-                    {
-                        Expect<CloseCompletedMessage>(await connector.ReadMessage(async), connector);
-                        statement.PreparedStatement.CompleteUnprepare();
-                        statement.PreparedStatement = null;
-                    }
-                Expect<ReadyForQueryMessage>(await connector.ReadMessage(async), connector);
-                if (async)
-                    await sendTask;
-                else
-                    sendTask.GetAwaiter().GetResult();
-            }
+            throw new NotImplementedException();
+            // var connection = CheckAndGetConnection();
+            // if (connection.Settings.Multiplexing)
+            //     throw new NotSupportedException("Explicit preparation not supported with multiplexing");
+            // if (_statements.All(s => !s.IsPrepared))
+            //     return;
+            //
+            // var connector = connection.Connector!;
+            //
+            // Log.Debug("Closing command's prepared statements", connector.Id);
+            // using (connector.StartUserAction(cancellationToken))
+            // {
+            //     var sendTask = SendClose(connector, async, cancellationToken);
+            //     if (sendTask.IsFaulted)
+            //         sendTask.GetAwaiter().GetResult();
+            //     foreach (var statement in _statements)
+            //         if (statement.PreparedStatement?.State == PreparedState.BeingUnprepared)
+            //         {
+            //             Expect<CloseCompletedMessage>(await connector.ReadMessage(async), connector);
+            //             statement.PreparedStatement.CompleteUnprepare();
+            //             statement.PreparedStatement = null;
+            //         }
+            //     Expect<ReadyForQueryMessage>(await connector.ReadMessage(async), connector);
+            //     if (async)
+            //         await sendTask;
+            //     else
+            //         sendTask.GetAwaiter().GetResult();
+            // }
         }
 
         #endregion Prepare
@@ -789,22 +788,23 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
         Task IExecutable.SendExecute(NpgsqlConnector connector, bool async, CancellationToken cancellationToken)
             => SendExecute(connector, async, cancellationToken);
 
-        async Task SendDeriveParameters(NpgsqlConnector connector, bool async, CancellationToken cancellationToken = default)
+        Task SendDeriveParameters(NpgsqlConnector connector, bool async, CancellationToken cancellationToken = default)
         {
+            throw new NotImplementedException();
             // BeginSend(connector);
 
-            for (var i = 0; i < _statements.Count; i++)
-            {
-                // async = ForceAsyncIfNecessary(async, i);
-
-                var statement = _statements[i];
-
-                await connector.WriteParse(statement.SQL, string.Empty, EmptyParameters, async, cancellationToken);
-                await connector.WriteDescribe(StatementOrPortal.Statement, string.Empty, async, cancellationToken);
-            }
-
-            await connector.WriteSync(async, cancellationToken);
-            await connector.Flush(async, cancellationToken);
+            // for (var i = 0; i < _statements.Count; i++)
+            // {
+            //     // async = ForceAsyncIfNecessary(async, i);
+            //
+            //     var statement = _statements[i];
+            //
+            //     await connector.WriteParse(statement.SQL, string.Empty, EmptyParameters, async, cancellationToken);
+            //     await connector.WriteDescribe(StatementOrPortal.Statement, string.Empty, async, cancellationToken);
+            // }
+            //
+            // await connector.WriteSync(async, cancellationToken);
+            // await connector.Flush(async, cancellationToken);
 
             // CleanupSend();
         }
@@ -829,24 +829,25 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             await connector.WriteDescribe(StatementOrPortal.Statement, pStatement.Name!, async, cancellationToken);
         }
 
-        async Task SendClose(NpgsqlConnector connector, bool async, CancellationToken cancellationToken = default)
+        Task SendClose(NpgsqlConnector connector, bool async, CancellationToken cancellationToken = default)
         {
+            throw new NotImplementedException();
             // BeginSend(connector);
 
-            foreach (var statement in _statements.Where(s => s.IsPrepared))
-            {
-                // if (FlushOccurred)
-                // {
-                //     async = true;
-                //     SynchronizationContext.SetSynchronizationContext(SingleThreadSynchronizationContext.Instance);
-                // }
-
-                await connector.WriteClose(StatementOrPortal.Statement, statement.StatementName, async, cancellationToken);
-                statement.PreparedStatement!.State = PreparedState.BeingUnprepared;
-            }
-
-            await connector.WriteSync(async, cancellationToken);
-            await connector.Flush(async, cancellationToken);
+            // foreach (var statement in _statements.Where(s => s.IsPrepared))
+            // {
+            //     // if (FlushOccurred)
+            //     // {
+            //     //     async = true;
+            //     //     SynchronizationContext.SetSynchronizationContext(SingleThreadSynchronizationContext.Instance);
+            //     // }
+            //
+            //     await connector.WriteClose(StatementOrPortal.Statement, statement.StatementName, async, cancellationToken);
+            //     statement.PreparedStatement!.State = PreparedState.BeingUnprepared;
+            // }
+            //
+            // await connector.WriteSync(async, cancellationToken);
+            // await connector.Flush(async, cancellationToken);
 
             // CleanupSend();
         }
@@ -1262,40 +1263,41 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
 
         void LogCommand()
         {
-            var connector = _connection!.Connector!;
-            var sb = new StringBuilder();
-            sb.AppendLine("Executing statement(s):");
-            foreach (var s in _statements)
-            {
-                sb.Append("\t").AppendLine(s.SQL);
-                var p = s.InputParameters;
-                if (p.Count > 0 && (NpgsqlLogManager.IsParameterLoggingEnabled || connector.Settings.LogParameters))
-                {
-                    for (var i = 0; i < p.Count; i++)
-                    {
-                        sb.Append("\t").Append("Parameters $").Append(i + 1).Append(":");
-                        switch (p[i].Value)
-                        {
-                        case IList list:
-                            for (var j = 0; j < list.Count; j++)
-                            {
-                                sb.Append("\t#").Append(j).Append(": ").Append(Convert.ToString(list[j], CultureInfo.InvariantCulture));
-                            }
-                            break;
-                        case DBNull _:
-                        case null:
-                            sb.Append("\t").Append(Convert.ToString("null", CultureInfo.InvariantCulture));
-                            break;
-                        default:
-                            sb.Append("\t").Append(Convert.ToString(p[i].Value, CultureInfo.InvariantCulture));
-                            break;
-                        }
-                        sb.AppendLine();
-                    }
-                }
-            }
-            Log.Debug(sb.ToString(), connector.Id);
-            connector.QueryLogStopWatch.Start();
+            throw new NotImplementedException();
+            // var connector = _connection!.Connector!;
+            // var sb = new StringBuilder();
+            // sb.AppendLine("Executing statement(s):");
+            // foreach (var s in _statements)
+            // {
+            //     sb.Append("\t").AppendLine(s.SQL);
+            //     var p = s.InputParameters;
+            //     if (p.Count > 0 && (NpgsqlLogManager.IsParameterLoggingEnabled || connector.Settings.LogParameters))
+            //     {
+            //         for (var i = 0; i < p.Count; i++)
+            //         {
+            //             sb.Append("\t").Append("Parameters $").Append(i + 1).Append(":");
+            //             switch (p[i].Value)
+            //             {
+            //             case IList list:
+            //                 for (var j = 0; j < list.Count; j++)
+            //                 {
+            //                     sb.Append("\t#").Append(j).Append(": ").Append(Convert.ToString(list[j], CultureInfo.InvariantCulture));
+            //                 }
+            //                 break;
+            //             case DBNull _:
+            //             case null:
+            //                 sb.Append("\t").Append(Convert.ToString("null", CultureInfo.InvariantCulture));
+            //                 break;
+            //             default:
+            //                 sb.Append("\t").Append(Convert.ToString(p[i].Value, CultureInfo.InvariantCulture));
+            //                 break;
+            //             }
+            //             sb.AppendLine();
+            //         }
+            //     }
+            // }
+            // Log.Debug(sb.ToString(), connector.Id);
+            // connector.QueryLogStopWatch.Start();
         }
 
         /// <summary>
