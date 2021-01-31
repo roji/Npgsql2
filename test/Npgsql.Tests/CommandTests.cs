@@ -536,6 +536,14 @@ namespace Npgsql.Tests
         }
 
         [Test]
+        public async Task Simple()
+        {
+            using var conn = await OpenConnectionAsync();
+            using var command = new NpgsqlCommand("SELECT 1", conn);
+            Assert.That(command.ExecuteScalarAsync, Is.EqualTo(1));
+        }
+
+        [Test]
         public async Task ExecuteScalar()
         {
             using var conn = await OpenConnectionAsync();

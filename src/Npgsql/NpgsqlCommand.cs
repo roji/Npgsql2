@@ -395,7 +395,8 @@ namespace Npgsql
         /// <summary>
         /// The input parameters sent with this statement.
         /// </summary>
-        internal List<NpgsqlParameter> InputParameters { get; } = new();
+        internal List<NpgsqlParameter> InputParameters { get; private set; } = null!;
+            // = new();
 
         #endregion
 
@@ -1017,26 +1018,29 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                         break;
 
                     case false:
-                        // TODO: Recycle
-                        NpgsqlBatchCommandCollection? batchCommands = null;
+                        // // TODO: Recycle
+                        // NpgsqlBatchCommandCollection? batchCommands = null;
+                        //
+                        // var commandRewriter = new CommandRewriter();
+                        // commandRewriter.RewriteCommand(
+                        //     CommandText,
+                        //     CommandType,
+                        //     Parameters,
+                        //     out _rewrittenCommandText,
+                        //     InputParameters,
+                        //     ref batchCommands,
+                        //     connector.UseConformingStrings);
+                        //
+                        // if (batchCommands is not null)
+                        // {
+                        //     // The command contained multiple statements, wrap in a batch
+                        //     // TODO: Need to do something with CommandBehavior...
+                        //     var batch = new NpgsqlBatch(conn, batchCommands);
+                        //     return await batch.ExecuteReader(async, cancellationToken);
+                        // }
 
-                        var commandRewriter = new CommandRewriter();
-                        commandRewriter.RewriteCommand(
-                            CommandText,
-                            CommandType,
-                            Parameters,
-                            out _rewrittenCommandText,
-                            InputParameters,
-                            ref batchCommands,
-                            connector.UseConformingStrings);
-
-                        if (batchCommands is not null)
-                        {
-                            // The command contained multiple statements, wrap in a batch
-                            // TODO: Need to do something with CommandBehavior...
-                            var batch = new NpgsqlBatch(conn, batchCommands);
-                            return await batch.ExecuteReader(async, cancellationToken);
-                        }
+                        _rewrittenCommandText = CommandText;
+                        InputParameters = Parameters._internalList;
 
                         AutoPrepare(connector);
 
@@ -1097,21 +1101,24 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                     }
 
                     ValidateParameters(conn.Pool!.MultiplexingTypeMapper!);
-                    // TODO: Recycle
-                    NpgsqlBatchCommandCollection? batchCommands = null;
+                    // // TODO: Recycle
+                    // NpgsqlBatchCommandCollection? batchCommands = null;
+                    //
+                    // var commandRewriter = new CommandRewriter();
+                    // commandRewriter.RewriteCommand(
+                    //     CommandText,
+                    //     CommandType,
+                    //     Parameters,
+                    //     out _rewrittenCommandText,
+                    //     InputParameters,
+                    //     ref batchCommands,
+                    //     standardConformingStrings: true);
+                    //
+                    // if (batchCommands is not null)
+                    //     throw new NotSupportedException(@"Multi-statement commands aren't supported in multiplexing, use NpgsqlDbBatch");
 
-                    var commandRewriter = new CommandRewriter();
-                    commandRewriter.RewriteCommand(
-                        CommandText,
-                        CommandType,
-                        Parameters,
-                        out _rewrittenCommandText,
-                        InputParameters,
-                        ref batchCommands,
-                        standardConformingStrings: true);
-
-                    if (batchCommands is not null)
-                        throw new NotSupportedException(@"Multi-statement commands aren't supported in multiplexing, use NpgsqlDbBatch");
+                    _rewrittenCommandText = CommandText;
+                    InputParameters = Parameters._internalList;
 
                     State = CommandState.InProgress;
 
