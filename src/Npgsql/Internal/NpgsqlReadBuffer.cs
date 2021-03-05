@@ -128,21 +128,21 @@ namespace Npgsql.Internal
             Ensure(count, false).GetAwaiter().GetResult();
         }
 
-        public Task Ensure(int count, bool async)
+        public ValueTask Ensure(int count, bool async)
             => Ensure(count, async, readingNotifications: false);
 
-        public Task EnsureAsync(int count)
+        public ValueTask EnsureAsync(int count)
             => Ensure(count, async: true, readingNotifications: false);
 
         /// <summary>
         /// Ensures that <paramref name="count"/> bytes are available in the buffer, and if
         /// not, reads from the socket until enough is available.
         /// </summary>
-        internal Task Ensure(int count, bool async, bool readingNotifications)
+        internal ValueTask Ensure(int count, bool async, bool readingNotifications)
         {
-            return count <= ReadBytesLeft ? Task.CompletedTask : EnsureLong(this, count, async, readingNotifications);
+            return count <= ReadBytesLeft ? default : EnsureLong(this, count, async, readingNotifications);
 
-            static async Task EnsureLong(
+            static async ValueTask EnsureLong(
                 NpgsqlReadBuffer buffer,
                 int count,
                 bool async,
@@ -267,7 +267,7 @@ namespace Npgsql.Internal
 
         internal void ReadMore() => ReadMore(false).GetAwaiter().GetResult();
 
-        internal Task ReadMore(bool async) => Ensure(ReadBytesLeft + 1, async);
+        internal ValueTask ReadMore(bool async) => Ensure(ReadBytesLeft + 1, async);
 
         internal NpgsqlReadBuffer AllocateOversize(int count)
         {

@@ -337,6 +337,9 @@ namespace Npgsql
         /// </param>
         /// <returns>A task representing the asynchronous operation.</returns>
         public override Task<bool> NextResultAsync(CancellationToken cancellationToken)
+            => NextResultAsync2(cancellationToken).AsTask();
+
+        internal ValueTask<bool> NextResultAsync2(CancellationToken cancellationToken)
         {
             using (NoSynchronizationContextScope.Enter())
                 return _isSchemaOnly
@@ -348,7 +351,7 @@ namespace Npgsql
         /// Internal implementation of NextResult
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        async Task<bool> NextResult(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
+        async ValueTask<bool> NextResult(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
         {
             CheckClosedOrDisposed();
 
@@ -583,7 +586,7 @@ namespace Npgsql
         /// Note that in SchemaOnly mode there are no resultsets, and we read nothing from the backend (all
         /// RowDescriptions have already been processed and are available)
         /// </summary>
-        async Task<bool> NextResultSchemaOnly(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
+        async ValueTask<bool> NextResultSchemaOnly(bool async, bool isConsuming = false, CancellationToken cancellationToken = default)
         {
             Debug.Assert(_isSchemaOnly);
 
