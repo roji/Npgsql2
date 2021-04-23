@@ -19,9 +19,9 @@ namespace Npgsql.TypeHandlers.CompositeHandlers
         readonly ConnectorTypeMapper _typeMapper;
         readonly INpgsqlNameTranslator _nameTranslator;
 
-        [NotNull] Func<T>? _constructor;
-        [NotNull] CompositeConstructorHandler<T>? _constructorHandler;
-        [NotNull] CompositeMemberHandler<T>[]? _memberHandlers;
+        [NotNull] Func<T>? _constructor = null!;
+        [NotNull] CompositeConstructorHandler<T>? _constructorHandler = null!;
+        [NotNull] CompositeMemberHandler<T>[]? _memberHandlers = null!;
 
         public Type CompositeType => typeof(T);
 

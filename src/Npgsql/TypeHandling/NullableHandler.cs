@@ -17,10 +17,10 @@ namespace Npgsql.TypeHandling
     static class NullableHandler<T>
     {
         public static readonly Type? UnderlyingType;
-        [NotNull] public static readonly ReadDelegate<T>? Read;
-        [NotNull] public static readonly ReadAsyncDelegate<T>? ReadAsync;
-        [NotNull] public static readonly ValidateAndGetLengthDelegate<T>? ValidateAndGetLength;
-        [NotNull] public static readonly WriteAsyncDelegate<T>? WriteAsync;
+        [NotNull] public static readonly ReadDelegate<T> Read = null!;
+        [NotNull] public static readonly ReadAsyncDelegate<T> ReadAsync = null!;
+        [NotNull] public static readonly ValidateAndGetLengthDelegate<T> ValidateAndGetLength = null!;
+        [NotNull] public static readonly WriteAsyncDelegate<T> WriteAsync = null!;
 
         public static bool Exists => UnderlyingType != null;
 
@@ -31,10 +31,10 @@ namespace Npgsql.TypeHandling
             if (UnderlyingType == null)
                 return;
 
-            Read = NullableHandler.CreateDelegate<ReadDelegate<T>>(UnderlyingType, NullableHandler.ReadMethod);
-            ReadAsync = NullableHandler.CreateDelegate<ReadAsyncDelegate<T>>(UnderlyingType, NullableHandler.ReadAsyncMethod);
-            ValidateAndGetLength = NullableHandler.CreateDelegate<ValidateAndGetLengthDelegate<T>>(UnderlyingType, NullableHandler.ValidateMethod);
-            WriteAsync = NullableHandler.CreateDelegate<WriteAsyncDelegate<T>>(UnderlyingType, NullableHandler.WriteAsyncMethod);
+            Read = NullableHandler.CreateDelegate<ReadDelegate<T>>(UnderlyingType, NullableHandler.ReadMethod)!;
+            ReadAsync = NullableHandler.CreateDelegate<ReadAsyncDelegate<T>>(UnderlyingType, NullableHandler.ReadAsyncMethod)!;
+            ValidateAndGetLength = NullableHandler.CreateDelegate<ValidateAndGetLengthDelegate<T>>(UnderlyingType, NullableHandler.ValidateMethod)!;
+            WriteAsync = NullableHandler.CreateDelegate<WriteAsyncDelegate<T>>(UnderlyingType, NullableHandler.WriteAsyncMethod)!;
         }
     }
 
