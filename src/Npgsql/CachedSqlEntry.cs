@@ -10,7 +10,7 @@ namespace Npgsql
     /// candidate for preparation (i.e. awaiting further usages).
     /// </summary>
     [DebuggerDisplay("{Name} ({State}): {Sql}")]
-    class PreparedStatement
+    class CachedSqlEntry
     {
         readonly PreparedStatementManager _manager;
 
@@ -36,7 +36,7 @@ namespace Npgsql
         /// If this statement is about to be prepared, but replaces a previous statement which needs to be closed,
         /// this holds the name of the previous statement. Otherwise null.
         /// </summary>
-        internal PreparedStatement? StatementBeingReplaced;
+        internal CachedSqlEntry? StatementBeingReplaced;
 
         internal DateTime LastUsed { get; set; }
 
@@ -48,14 +48,14 @@ namespace Npgsql
 
         static readonly Type[] EmptyParamTypes = Type.EmptyTypes;
 
-        internal static PreparedStatement CreateExplicit(
+        internal static CachedSqlEntry CreateExplicit(
             PreparedStatementManager manager,
             string sql,
             string name,
             List<NpgsqlParameter> parameters,
-            PreparedStatement? statementBeingReplaced)
+            CachedSqlEntry? statementBeingReplaced)
         {
-            var pStatement = new PreparedStatement(manager, sql, true)
+            var pStatement = new CachedSqlEntry(manager, sql, true)
             {
                 Name = name,
                 StatementBeingReplaced = statementBeingReplaced
@@ -64,10 +64,10 @@ namespace Npgsql
             return pStatement;
         }
 
-        internal static PreparedStatement CreateAutoPrepareCandidate(PreparedStatementManager manager, string sql)
+        internal static CachedSqlEntry CreateAutoPrepareCandidate(PreparedStatementManager manager, string sql)
             => new(manager, sql, false);
 
-        PreparedStatement(PreparedStatementManager manager, string sql, bool isExplicit)
+        CachedSqlEntry(PreparedStatementManager manager, string sql, bool isExplicit)
         {
             _manager = manager;
             Sql = sql;
@@ -121,7 +121,7 @@ namespace Npgsql
     }
 
     /// <summary>
-    /// The state of a <see cref="PreparedStatement"/>.
+    /// The state of a <see cref="CachedSqlEntry"/>.
     /// </summary>
     enum PreparedState
     {

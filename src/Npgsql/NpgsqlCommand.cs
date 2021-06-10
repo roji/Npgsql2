@@ -482,7 +482,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             using (connector.StartUserAction())
             {
                 Log.Debug($"Deriving Parameters for query: {CommandText}", connector.Id);
-                ProcessRawQuery(connector.UseConformingStrings, deriveParameters: true);
+                ProcessRawQuery(connector, deriveParameters: true);
 
                 var sendTask = SendDeriveParameters(connector, false);
                 if (sendTask.IsFaulted)
@@ -581,7 +581,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             for (var i = 0; i < Parameters.Count; i++)
                 Parameters[i].Bind(connector.TypeMapper);
 
-            ProcessRawQuery(connector.UseConformingStrings, deriveParameters: false);
+            ProcessRawQuery(connector, deriveParameters: false);
             Log.Debug($"Preparing: {CommandText}", connector.Id);
 
             var needToPrepare = false;
@@ -740,7 +740,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
 
         #region Query analysis
 
-        internal void ProcessRawQuery(bool standardConformingStrings, bool deriveParameters)
+        internal void ProcessRawQuery(NpgsqlConnector connector, bool deriveParameters)
         {
             if (string.IsNullOrEmpty(CommandText))
                 throw new InvalidOperationException("CommandText property has not been initialized");
@@ -748,23 +748,14 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             NpgsqlStatement statement;
             switch (CommandType) {
             case CommandType.Text:
-                var parser = new SqlQueryParser();
-                parser.ParseRawQuery(CommandText, _parameters, _statements, standardConformingStrings, deriveParameters);
+                connector.SqlQueryParser.ParseRawQuery(CommandText, _parameters, _statements, connector.UseConformingStrings, deriveParameters);
 
                 if (_statements.Count > 1 && _parameters.HasOutputParameters)
                     throw new NotSupportedException("Commands with multiple queries cannot have out parameters");
                 break;
 
             case CommandType.TableDirect:
-                if (_statements.Count == 0)
-                    statement = new NpgsqlStatement();
-                else
-                {
-                    statement = _statements[0];
-                    statement.Reset();
-                    _statements.Clear();
-                }
-                _statements.Add(statement);
+                statement = TruncateStatementsToOne();
                 statement.SQL = "SELECT * FROM " + CommandText;
                 break;
 
@@ -804,17 +795,9 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 }
                 sb.Append(')');
 
-                if (_statements.Count == 0)
-                    statement = new NpgsqlStatement();
-                else
-                {
-                    statement = _statements[0];
-                    statement.Reset();
-                    _statements.Clear();
-                }
+                statement = TruncateStatementsToOne();
                 statement.SQL = sb.ToString();
                 statement.InputParameters.AddRange(inputList);
-                _statements.Add(statement);
                 break;
             default:
                 throw new InvalidOperationException($"Internal Npgsql bug: unexpected value {CommandType} of enum {nameof(CommandType)}. Please file a bug.");
@@ -1229,34 +1212,12 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                             break;
 
                         case false:
-                            ProcessRawQuery(connector.UseConformingStrings, deriveParameters: false);
-
-                            if (connector.Settings.MaxAutoPrepare > 0)
+                            if (connector.Settings.MaxAutoPrepare > 0 && CommandType == CommandType.Text)
+                                AutoPrepare();
+                            else
                             {
-                                var numPrepared = 0;
-                                foreach (var statement in _statements)
-                                {
-                                    // If this statement isn't prepared, see if it gets implicitly prepared.
-                                    // Note that this may return null (not enough usages for automatic preparation).
-                                    if (!statement.IsPrepared)
-                                        statement.PreparedStatement = connector.PreparedStatementManager.TryGetAutoPrepared(statement);
-                                    if (statement.PreparedStatement is PreparedStatement pStatement)
-                                    {
-                                        numPrepared++;
-                                        if (pStatement?.State == PreparedState.NotPrepared)
-                                        {
-                                            pStatement.State = PreparedState.BeingPrepared;
-                                            statement.IsPreparing = true;
-                                        }
-                                    }
-                                }
-
-                                if (numPrepared > 0)
-                                {
-                                    _connectorPreparedOn = connector;
-                                    if (numPrepared == _statements.Count)
-                                        NpgsqlEventSource.Log.CommandStartPrepared();
-                                }
+                                // Auto-prepare is disabled, go through full command rewriting
+                                ProcessRawQuery(connector, deriveParameters: false);
                             }
 
                             break;
@@ -1324,7 +1285,6 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                     }
 
                     ValidateParameters(pool.MultiplexingTypeMapper!);
-                    ProcessRawQuery(standardConformingStrings: true, deriveParameters: false);
 
                     State = CommandState.InProgress;
 
@@ -1365,6 +1325,77 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 }
                     
                 throw;
+            }
+
+            void AutoPrepare()
+            {
+                var numPrepared = 0;
+
+                if (connector.PreparedStatementManager.BySql.TryGetValue(CommandText, out var cachedSqlEntry) &&
+                    (Parameters.Count == 0 || Parameters[0].ParameterName == ""))
+                {
+                    // The SQL has been found in the cache, and we're in positional parameter mode.
+                    // This is the optimized mode, where we don't need to parse/rewrite the CommandText or reorder the
+                    // parameters - just use them as is.
+                    var statement = TruncateStatementsToOne();
+                    statement.SQL = CommandText;
+                    statement.InputParameters = Parameters.InternalList;
+
+                    TryAutoPrepare(statement, cachedSqlEntry);
+                }
+                else
+                {
+                    // This is either the first time we're seeing this CommandText (in which case it may contain legacy
+                    // batching), or we're in named parameter mode. Either way, we need to parse and possibly rewrite it.
+                    ProcessRawQuery(connector, deriveParameters: false);
+
+                    if (_statements.Count > 1)
+                    {
+                        // Legacy batching mode (semicolon found in NpgsqlCommand.CommandText).
+                        // Enumerate over the statements we've parsed out above, and auto-prepare them.
+                        // Note that while the individual statements may get cached, the command as a whole isn't.
+                        Debug.Assert(cachedSqlEntry is null);
+
+                        foreach (var statement in _statements)
+                        {
+                            if (!connector.PreparedStatementManager.BySql.TryGetValue(statement.SQL, out cachedSqlEntry))
+                                cachedSqlEntry = connector.PreparedStatementManager.CreateAutoPrepareCandidate(statement.SQL);
+
+                            if (!statement.IsPrepared)
+                                TryAutoPrepare(statement, cachedSqlEntry);
+                        }
+                    }
+                    else
+                    {
+                        // This is a single-statement command we haven't seen before.
+                        // Create a SQL cache entry for it.
+                        cachedSqlEntry = connector.PreparedStatementManager.CreateAutoPrepareCandidate(_statements[0].SQL);
+
+                        TryAutoPrepare(_statements[0], cachedSqlEntry);
+                    }
+                }
+
+                if (numPrepared > 0)
+                {
+                    _connectorPreparedOn = connector;
+                    if (numPrepared == _statements.Count)
+                        NpgsqlEventSource.Log.CommandStartPrepared();
+                }
+
+                void TryAutoPrepare(NpgsqlStatement statement, CachedSqlEntry cachedSqlEntry)
+                {
+                    if (connector!.PreparedStatementManager.TryAutoPrepare(cachedSqlEntry, statement.InputParameters))
+                    {
+                        numPrepared++;
+                        if (cachedSqlEntry.State == PreparedState.NotPrepared)
+                        {
+                            cachedSqlEntry.State = PreparedState.BeingPrepared;
+                            statement.IsPreparing = true;
+                        }
+
+                        statement.PreparedStatement = cachedSqlEntry;
+                    }
+                }
             }
 
             async Task NonMultiplexingWriteWrapper(NpgsqlConnector connector, bool async, CancellationToken cancellationToken2)
@@ -1446,6 +1477,29 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
         #endregion
 
         #region Misc
+
+        NpgsqlStatement TruncateStatementsToOne()
+        {
+            switch (_statements.Count)
+            {
+            case 0:
+                var statement = new NpgsqlStatement();
+                _statements.Add(statement);
+                return statement;
+
+            case 1:
+                statement = _statements[0];
+                statement.Reset();
+                return statement;
+
+            default:
+                statement = _statements[0];
+                statement.Reset();
+                _statements.Clear();
+                _statements.Add(statement);
+                return statement;
+            }
+        }
 
         /// <summary>
         /// Fixes up the text/binary flag on result columns.

@@ -263,23 +263,24 @@ namespace Npgsql
                 // but the main thread continues to handle other commands on other connectors.
                 if (_autoPrepare)
                 {
-                    var numPrepared = 0;
-                    foreach (var statement in command._statements)
-                    {
-                        // If this statement isn't prepared, see if it gets implicitly prepared.
-                        // Note that this may return null (not enough usages for automatic preparation).
-                        if (!statement.IsPrepared)
-                            statement.PreparedStatement = connector.PreparedStatementManager.TryGetAutoPrepared(statement);
-                        if (statement.PreparedStatement is PreparedStatement pStatement)
-                        {
-                            numPrepared++;
-                            if (pStatement?.State == PreparedState.NotPrepared)
-                            {
-                                pStatement.State = PreparedState.BeingPrepared;
-                                statement.IsPreparing = true;
-                            }
-                        }
-                    }
+                    throw new NotImplementedException();
+                    // var numPrepared = 0;
+                    // foreach (var statement in command._statements)
+                    // {
+                    //     // If this statement isn't prepared, see if it gets implicitly prepared.
+                    //     // Note that this may return null (not enough usages for automatic preparation).
+                    //     if (!statement.IsPrepared)
+                    //         statement.PreparedStatement = connector.PreparedStatementManager.TryAutoPrepare(statement);
+                    //     if (statement.PreparedStatement is CachedSqlEntry pStatement)
+                    //     {
+                    //         numPrepared++;
+                    //         if (pStatement?.State == PreparedState.NotPrepared)
+                    //         {
+                    //             pStatement.State = PreparedState.BeingPrepared;
+                    //             statement.IsPreparing = true;
+                    //         }
+                    //     }
+                    // }
                 }
 
                 var written = connector.CommandsInFlightWriter!.TryWrite(command);

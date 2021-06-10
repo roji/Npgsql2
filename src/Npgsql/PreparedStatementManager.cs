@@ -11,11 +11,11 @@ namespace Npgsql
         internal int MaxAutoPrepared { get; }
         internal int UsagesBeforePrepare { get; }
 
-        internal Dictionary<string, PreparedStatement> BySql { get; } = new();
-        readonly PreparedStatement[] _autoPrepared;
+        internal Dictionary<string, CachedSqlEntry> BySql { get; } = new();
+        readonly CachedSqlEntry[] _autoPrepared;
         int _numAutoPrepared;
 
-        readonly PreparedStatement?[] _candidates;
+        readonly CachedSqlEntry?[] _candidates;
 
         /// <summary>
         /// Total number of current prepared statements (whether explicit or automatic).
@@ -40,8 +40,8 @@ namespace Npgsql
             {
                 if (MaxAutoPrepared > 256)
                     Log.Warn($"{nameof(MaxAutoPrepared)} is over 256, performance degradation may occur. Please report via an issue.", connector.Id);
-                _autoPrepared = new PreparedStatement[MaxAutoPrepared];
-                _candidates = new PreparedStatement[CandidateCount];
+                _autoPrepared = new CachedSqlEntry[MaxAutoPrepared];
+                _candidates = new CachedSqlEntry[CandidateCount];
             }
             else
             {
@@ -50,11 +50,11 @@ namespace Npgsql
             }
         }
 
-        internal PreparedStatement? GetOrAddExplicit(NpgsqlStatement statement)
+        internal CachedSqlEntry? GetOrAddExplicit(NpgsqlStatement statement)
         {
             var sql = statement.SQL;
 
-            PreparedStatement? statementBeingReplaced = null;
+            CachedSqlEntry? statementBeingReplaced = null;
             if (BySql.TryGetValue(sql, out var pStatement))
             {
                 Debug.Assert(pStatement.State != PreparedState.Unprepared);
@@ -87,49 +87,49 @@ namespace Npgsql
             }
 
             // Statement hasn't been prepared yet
-            return BySql[sql] = PreparedStatement.CreateExplicit(this, sql, NextPreparedStatementName(), statement.InputParameters, statementBeingReplaced);
+            return BySql[sql] = CachedSqlEntry.CreateExplicit(this, sql, NextPreparedStatementName(), statement.InputParameters, statementBeingReplaced);
         }
 
-        internal PreparedStatement? TryGetAutoPrepared(NpgsqlStatement statement)
+        internal CachedSqlEntry CreateAutoPrepareCandidate(string sql)
         {
-            var sql = statement.SQL;
-            if (!BySql.TryGetValue(sql, out var pStatement))
+            // New candidate. Find an empty candidate slot or eject a least-used one.
+            int slotIndex = -1, leastUsages = int.MaxValue;
+            var lastUsed = DateTime.MaxValue;
+            for (var i = 0; i < _candidates.Length; i++)
             {
-                // New candidate. Find an empty candidate slot or eject a least-used one.
-                int slotIndex = -1, leastUsages = int.MaxValue;
-                var lastUsed = DateTime.MaxValue;
-                for (var i = 0; i < _candidates.Length; i++)
-                {
-                    var candidate = _candidates[i];
-                    // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-                    // ReSharper disable HeuristicUnreachableCode
-                    if (candidate == null)  // Found an unused candidate slot, return immediately
-                    {
-                        slotIndex = i;
-                        break;
-                    }
-                    // ReSharper restore HeuristicUnreachableCode
-                    if (candidate.Usages < leastUsages)
-                    {
-                        leastUsages = candidate.Usages;
-                        slotIndex = i;
-                        lastUsed = candidate.LastUsed;
-                    }
-                    else if (candidate.Usages == leastUsages && candidate.LastUsed < lastUsed)
-                    {
-                        slotIndex = i;
-                        lastUsed = candidate.LastUsed;
-                    }
-                }
-
-                var leastUsed = _candidates[slotIndex];
+                var candidate = _candidates[i];
                 // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-                if (leastUsed != null)
-                    BySql.Remove(leastUsed.Sql);
-                pStatement = BySql[sql] = _candidates[slotIndex] = PreparedStatement.CreateAutoPrepareCandidate(this, sql);
+                // ReSharper disable HeuristicUnreachableCode
+                if (candidate == null)  // Found an unused candidate slot, return immediately
+                {
+                    slotIndex = i;
+                    break;
+                }
+                // ReSharper restore HeuristicUnreachableCode
+                if (candidate.Usages < leastUsages)
+                {
+                    leastUsages = candidate.Usages;
+                    slotIndex = i;
+                    lastUsed = candidate.LastUsed;
+                }
+                else if (candidate.Usages == leastUsages && candidate.LastUsed < lastUsed)
+                {
+                    slotIndex = i;
+                    lastUsed = candidate.LastUsed;
+                }
             }
 
-            switch (pStatement.State)
+            var leastUsed = _candidates[slotIndex];
+            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
+            if (leastUsed != null)
+                BySql.Remove(leastUsed.Sql);
+
+            return BySql[sql] = _candidates[slotIndex] = CachedSqlEntry.CreateAutoPrepareCandidate(this, sql);
+        }
+
+        internal bool TryAutoPrepare(CachedSqlEntry cachedSqlEntry, List<NpgsqlParameter> parameters)
+        {
+            switch (cachedSqlEntry.State)
             {
             case PreparedState.NotPrepared:
                 break;
@@ -140,37 +140,38 @@ namespace Npgsql
                 // for preparation (earlier identical statement in the same command).
                 // We just need to check that the parameter types correspond, since prepared statements are
                 // only keyed by SQL (to prevent pointless allocations). If we have a mismatch, simply run unprepared.
-                if (!pStatement.DoParametersMatch(statement.InputParameters))
-                    return null;
+                if (!cachedSqlEntry.DoParametersMatch(parameters))
+                    return false;
+
                 // Prevent this statement from being replaced within this batch
-                pStatement.LastUsed = DateTime.MaxValue;
-                return pStatement;
+                cachedSqlEntry.LastUsed = DateTime.MaxValue;
+                return true;
 
             case PreparedState.BeingUnprepared:
                 // The statement is being replaced by an earlier statement in this same batch.
-                return null;
+                return false;
 
             default:
-                Debug.Fail($"Unexpected {nameof(PreparedState)} in auto-preparation: {pStatement.State}");
+                Debug.Fail($"Unexpected {nameof(PreparedState)} in auto-preparation: {cachedSqlEntry.State}");
                 break;
             }
 
-            if (++pStatement.Usages < UsagesBeforePrepare)
+            if (++cachedSqlEntry.Usages < UsagesBeforePrepare)
             {
                 // Statement still hasn't passed the usage threshold, no automatic preparation.
                 // Return null for unprepared execution.
-                pStatement.LastUsed = DateTime.UtcNow;
-                return null;
+                cachedSqlEntry.LastUsed = DateTime.UtcNow;
+                return false;
             }
 
             // Bingo, we've just passed the usage threshold, statement should get prepared
-            Log.Trace($"Automatically preparing statement: {sql}", _connector.Id);
+            Log.Trace($"Automatically preparing statement: {cachedSqlEntry.Sql}", _connector.Id);
 
             if (_numAutoPrepared < MaxAutoPrepared)
             {
                 // We still have free slots
-                _autoPrepared[_numAutoPrepared++] = pStatement;
-                pStatement.Name = "_auto" + _numAutoPrepared;
+                _autoPrepared[_numAutoPrepared++] = cachedSqlEntry;
+                cachedSqlEntry.Name = "_auto" + _numAutoPrepared;
             }
             else
             {
@@ -200,8 +201,8 @@ namespace Npgsql
                     case PreparedState.Unprepared:
                         // Found an unprepared statement slot; this can occur if a previous preparation failed because of an error.
                         // Use that immediately, no need to continue looking for an LRU.
-                        pStatement.Name = slot.Name;
-                        _autoPrepared[i] = pStatement;
+                        cachedSqlEntry.Name = slot.Name;
+                        _autoPrepared[i] = cachedSqlEntry;
                         foundUnpreparedSlot = true;
                         break;
 
@@ -221,31 +222,32 @@ namespace Npgsql
                     {
                         // We're here if we couldn't find a prepared statement to replace, because all of them are already
                         // being prepared in this batch.
-                        return null;
+                        return false;
                     }
 
                     var selectedSlot = _autoPrepared[oldestIndex];
-                    pStatement.Name = selectedSlot.Name;
-                    pStatement.StatementBeingReplaced = selectedSlot;
+                    cachedSqlEntry.Name = selectedSlot.Name;
+                    cachedSqlEntry.StatementBeingReplaced = selectedSlot;
                     selectedSlot.State = PreparedState.BeingUnprepared;
-                    _autoPrepared[oldestIndex] = pStatement;
+                    _autoPrepared[oldestIndex] = cachedSqlEntry;
                 }
             }
 
-            RemoveCandidate(pStatement);
+            RemoveCandidate(cachedSqlEntry);
 
             // Make sure this statement isn't replaced by a later statement in the same batch.
-            pStatement.LastUsed = DateTime.MaxValue;
+            cachedSqlEntry.LastUsed = DateTime.MaxValue;
 
             // Note that the parameter types are only set at the moment of preparation - in the candidate phase
             // there's no differentiation between overloaded statements, which are a pretty rare case, saving
             // allocations.
-            pStatement.SetParamTypes(statement.InputParameters);
 
-            return pStatement;
+            cachedSqlEntry.SetParamTypes(parameters);
+
+            return true;
         }
 
-        void RemoveCandidate(PreparedStatement candidate)
+        void RemoveCandidate(CachedSqlEntry candidate)
         {
             var i = 0;
             for (; i < _candidates.Length; i++)

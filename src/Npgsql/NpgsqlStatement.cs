@@ -1,4 +1,6 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using Npgsql.BackendMessages;
 
 namespace Npgsql
@@ -53,7 +55,20 @@ namespace Npgsql
         /// <summary>
         /// The input parameters sent with this statement.
         /// </summary>
-        public List<NpgsqlParameter> InputParameters { get; } = new();
+        [AllowNull]
+        public List<NpgsqlParameter> InputParameters
+        {
+            get => _inputParameters!;
+            internal set
+            {
+                _inputParameters = value;
+                IsParameterListOwned = false;
+            }
+        }
+
+        List<NpgsqlParameter>? _inputParameters = new();
+
+        internal bool IsParameterListOwned { get; set; } = true;
 
         /// <summary>
         /// The RowDescription message for this query. If null, the query does not return rows (e.g. INSERT)
@@ -76,7 +91,7 @@ namespace Npgsql
         /// If this statement has been automatically prepared, references the <see cref="PreparedStatement"/>.
         /// Null otherwise.
         /// </summary>
-        internal PreparedStatement? PreparedStatement
+        internal CachedSqlEntry? PreparedStatement
         {
             get => _preparedStatement != null && _preparedStatement.State == PreparedState.Unprepared
                 ? _preparedStatement = null
@@ -84,7 +99,7 @@ namespace Npgsql
             set => _preparedStatement = value;
         }
 
-        PreparedStatement? _preparedStatement;
+        CachedSqlEntry? _preparedStatement;
 
         internal bool IsPreparing;
 
@@ -98,15 +113,21 @@ namespace Npgsql
         /// </summary>
         internal bool IsPrepared => PreparedStatement?.IsPrepared == true;
 
-        internal void Reset()
+        internal void Reset(bool requireOwnedParameterList = true)
         {
             SQL = string.Empty;
             StatementType = StatementType.Select;
             _description = null;
             LongRows = 0;
             OID = 0;
-            InputParameters.Clear();
             PreparedStatement = null;
+
+            if (IsParameterListOwned)
+                InputParameters.Clear();
+            else if (requireOwnedParameterList)
+                InputParameters = new();
+            else
+                InputParameters = null;
         }
 
         internal void ApplyCommandComplete(CommandCompleteMessage msg)
