@@ -49,6 +49,14 @@ namespace Npgsql
 #endif
             => InnerException is IOException || InnerException is SocketException || InnerException is TimeoutException;
 
+#if NET6_0_OR_GREATER
+        public new NpgsqlBatchCommand? BatchCommand { get; set; }
+
+        protected override DbBatchCommand? DbBatchCommand => BatchCommand;
+#else
+        public NpgsqlBatchCommand? BatchCommand { get; set; }
+#endif
+
         #region Serialization
 
         /// <summary>

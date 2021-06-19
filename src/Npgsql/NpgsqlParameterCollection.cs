@@ -5,6 +5,7 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using Npgsql.TypeMapping;
 using NpgsqlTypes;
 
 namespace Npgsql
@@ -16,6 +17,7 @@ namespace Npgsql
     public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<NpgsqlParameter>
     {
         internal const int LookupThreshold = 5;
+
         internal List<NpgsqlParameter> InternalList { get; } = new(5);
 #if DEBUG
         internal static bool CaseInsensitiveCompatMode;
@@ -643,6 +645,47 @@ namespace Npgsql
             other._lookup = _lookup;
         }
 
+        internal void ValidateAndBind(ConnectorTypeMapper typeMapper)
+        {
+            var hasOutputParameters = false;
+
+            foreach (var p in InternalList)
+            {
+                CalculatePlaceholderType(p);
+
+                switch (p.Direction)
+                {
+                case ParameterDirection.Input:
+                    break;
+
+                case ParameterDirection.InputOutput:
+                    if (PlaceholderType == PlaceholderType.Positional)
+                        throw new NotSupportedException("Output parameters are not supported in positional mode");
+                    hasOutputParameters = true;
+                    break;
+
+                case ParameterDirection.Output:
+                    if (PlaceholderType == PlaceholderType.Positional)
+                        throw new NotSupportedException("Output parameters are not supported in positional mode");
+                    hasOutputParameters = true;
+                    continue;
+
+                case ParameterDirection.ReturnValue:
+                    continue;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(ParameterDirection),
+                        $"Unhandled {nameof(ParameterDirection)} value: {p.Direction}");
+                }
+
+                p.Bind(typeMapper);
+                p.LengthCache?.Clear();
+                p.ValidateAndGetLength();
+            }
+
+            HasOutputParameters = hasOutputParameters;
+        }
+
         internal void CalculatePlaceholderType(NpgsqlParameter p)
         {
             if (p.IsPositional)
@@ -693,16 +736,10 @@ namespace Npgsql
         internal PlaceholderType PlaceholderType { get; set; }
 
         static NpgsqlParameter Cast(object? value)
-        {
-            try
-            {
-                return (NpgsqlParameter)value!;
-            }
-            catch (Exception)
-            {
-                throw new InvalidCastException($"The value \"{value}\" is not of type \"{nameof(NpgsqlParameter)}\" and cannot be used in this parameter collection.");
-            }
-        }
+            => value is NpgsqlParameter p
+                ? p
+                : throw new InvalidCastException(
+                    $"The value \"{value}\" is not of type \"{nameof(NpgsqlParameter)}\" and cannot be used in this parameter collection.");
     }
 
     enum PlaceholderType

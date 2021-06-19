@@ -61,6 +61,14 @@ namespace Npgsql
         public override bool CanCreateCommandBuilder => true;
 #endif
 
+#if NET6_0_OR_GREATER
+        public override bool CanCreateBatch => true;
+
+        public override DbBatch CreateBatch() => new NpgsqlBatch();
+
+        public override DbBatchCommand CreateBatchCommand() => new NpgsqlBatchCommand();
+#endif
+
         #region IServiceProvider Members
 
         /// <summary>
